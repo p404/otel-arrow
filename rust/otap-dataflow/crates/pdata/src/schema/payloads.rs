@@ -61,10 +61,7 @@ pub fn get(typ: ArrowPayloadType) -> &'static Schema {
         ArrowPayloadType::FunctionTable => &function_table::SCHEMA,
         ArrowPayloadType::LinkTable => &link_table::SCHEMA,
         ArrowPayloadType::StringTable => &string_table::SCHEMA,
-        // The profiles attribute table is a flat, index-referenced table of
-        // key/type/value columns identical in shape to the existing 32-bit
-        // parent-id attribute tables, so it is reused rather than duplicated.
-        ArrowPayloadType::AttributeTable => &attributes_32::SCHEMA,
+        ArrowPayloadType::AttributeTable => &attribute_table::SCHEMA,
         ArrowPayloadType::AttributeUnits => &attribute_units::SCHEMA,
     }
 }
@@ -1823,6 +1820,98 @@ mod link_table {
             ID => Some(0),
             TRACE_ID => Some(1),
             SPAN_ID => Some(2),
+            _ => None,
+        }
+    }
+}
+
+mod attribute_table {
+    use super::*;
+
+    /// One row per entry of `ProfilesData.attribute_table` (a flat
+    /// `repeated common.v1.KeyValue`). Samples, locations, mappings and the
+    /// profile reference entries by absolute row position, so `id` is the
+    /// synthetic row index (like the other profiles lookup tables) — this is a
+    /// standalone table, NOT the parent-id-joined attribute side table, so its
+    /// `id` is never rewritten as a join key by transport optimization. The
+    /// value lanes mirror the shared attribute value encoding (`attributes_32`).
+    pub(super) static SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: ID,
+                data_type: DataType::Simple(UInt32),
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_KEY,
+                data_type: DataType::Dictionary {
+                    min_key_size: DictKeySize::U8,
+                    value_type: Utf8,
+                },
+                required: true,
+            },
+            Field {
+                name: ATTRIBUTE_TYPE,
+                data_type: DataType::Simple(UInt8),
+                required: true,
+            },
+            Field {
+                name: ATTRIBUTE_STR,
+                data_type: DataType::Dictionary {
+                    min_key_size: DictKeySize::U16,
+                    value_type: Utf8,
+                },
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_INT,
+                data_type: DataType::Dictionary {
+                    min_key_size: DictKeySize::U16,
+                    value_type: Int64,
+                },
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_DOUBLE,
+                data_type: DataType::Simple(Float64),
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_BOOL,
+                data_type: DataType::Simple(Boolean),
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_BYTES,
+                data_type: DataType::Dictionary {
+                    min_key_size: DictKeySize::U16,
+                    value_type: Binary,
+                },
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_SER,
+                data_type: DataType::Dictionary {
+                    min_key_size: DictKeySize::U16,
+                    value_type: Binary,
+                },
+                required: false,
+            },
+        ],
+        idx,
+    };
+
+    fn idx(name: &str) -> Option<usize> {
+        match name {
+            ID => Some(0),
+            ATTRIBUTE_KEY => Some(1),
+            ATTRIBUTE_TYPE => Some(2),
+            ATTRIBUTE_STR => Some(3),
+            ATTRIBUTE_INT => Some(4),
+            ATTRIBUTE_DOUBLE => Some(5),
+            ATTRIBUTE_BOOL => Some(6),
+            ATTRIBUTE_BYTES => Some(7),
+            ATTRIBUTE_SER => Some(8),
             _ => None,
         }
     }
