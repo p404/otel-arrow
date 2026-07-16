@@ -79,16 +79,17 @@ pub const POSITION_LOOKUP: &[usize] = &[
     UNUSED_INDEX, // 47
     UNUSED_INDEX, // 48
     UNUSED_INDEX, // 49
-    // profiles:
-    0, // Profiles = 50,
-    1, // Sample = 51,
-    2, // MappingTable = 52,
-    3, // LocationTable = 53,
-    4, // FunctionTable = 54,
-    5, // LinkTable = 55,
-    6, // StringTable = 56,
-    7, // AttributeTable = 57,
-    8, // AttributeUnits = 58,
+    // profiles (slots 0/1 are the shared ResourceAttrs/ScopeAttrs, as for
+    // every other signal, so the signal-specific types start at 2):
+    2,  // Profiles = 50,
+    3,  // Sample = 51,
+    4,  // MappingTable = 52,
+    5,  // LocationTable = 53,
+    6,  // FunctionTable = 54,
+    7,  // LinkTable = 55,
+    8,  // StringTable = 56,
+    9,  // AttributeTable = 57,
+    10, // AttributeUnits = 58,
 ];
 
 // ---------------------------------------------------------------------------
@@ -141,12 +142,36 @@ pub const TRACES_TYPE_MASK: u64 = (1 << ArrowPayloadType::ResourceAttrs as u64)
 /// Number of payload slots for the Traces signal.
 pub const TRACES_COUNT: usize = 8;
 
+/// The payload types that make up the Profiles signal. Resource- and
+/// scope-level attributes travel in the shared `ResourceAttrs`/`ScopeAttrs`
+/// side-tables (joined via the embedded resource/scope `id`), exactly as for
+/// the other signals; the remaining types are the profiles-specific tables.
+///
+/// Not yet wired up to an `OtapArrowRecords::Profiles` variant (Stage 0a is
+/// pdata-schema-only); reserved for a later stage.
+#[allow(dead_code)]
+pub const PROFILES_PAYLOAD_TYPES: &[ArrowPayloadType; PROFILES_COUNT] = &[
+    ArrowPayloadType::ResourceAttrs,
+    ArrowPayloadType::ScopeAttrs,
+    ArrowPayloadType::Profiles,
+    ArrowPayloadType::Sample,
+    ArrowPayloadType::MappingTable,
+    ArrowPayloadType::LocationTable,
+    ArrowPayloadType::FunctionTable,
+    ArrowPayloadType::LinkTable,
+    ArrowPayloadType::StringTable,
+    ArrowPayloadType::AttributeTable,
+    ArrowPayloadType::AttributeUnits,
+];
+
 /// Bitmask of valid [`ArrowPayloadType`] values for the Profiles signal.
 ///
 /// Not yet wired up to an `OtapArrowRecords::Profiles` variant (Stage 0a is
 /// pdata-schema-only); reserved for a later stage.
 #[allow(dead_code)]
-pub const PROFILES_TYPE_MASK: u64 = (1 << ArrowPayloadType::Profiles as u64)
+pub const PROFILES_TYPE_MASK: u64 = (1 << ArrowPayloadType::ResourceAttrs as u64)
+    + (1 << ArrowPayloadType::ScopeAttrs as u64)
+    + (1 << ArrowPayloadType::Profiles as u64)
     + (1 << ArrowPayloadType::Sample as u64)
     + (1 << ArrowPayloadType::MappingTable as u64)
     + (1 << ArrowPayloadType::LocationTable as u64)
@@ -158,7 +183,7 @@ pub const PROFILES_TYPE_MASK: u64 = (1 << ArrowPayloadType::Profiles as u64)
 
 /// Number of payload slots for the Profiles signal.
 #[allow(dead_code)]
-pub const PROFILES_COUNT: usize = 9;
+pub const PROFILES_COUNT: usize = 11;
 
 // ---------------------------------------------------------------------------
 // Type aliases
@@ -378,5 +403,43 @@ mod tests {
 
         let store = RawTracesStore::new();
         assert_eq!(store.into_batches().len(), TRACES_COUNT);
+
+        let store = RawProfilesStore::new();
+        assert_eq!(store.into_batches().len(), PROFILES_COUNT);
+    }
+
+    /// The Profiles store invariants that nothing else compile-checks:
+    /// the type mask is exactly the OR of `PROFILES_PAYLOAD_TYPES`, and
+    /// `POSITION_LOOKUP` maps those types onto exactly `0..PROFILES_COUNT`
+    /// with no collisions (a duplicate slot would silently alias two payload
+    /// types onto the same array entry).
+    #[test]
+    fn profiles_position_lookup_is_collision_free() {
+        use std::collections::HashSet;
+
+        let mask: u64 = PROFILES_PAYLOAD_TYPES
+            .iter()
+            .map(|&pt| 1u64 << pt as u64)
+            .sum();
+        assert_eq!(
+            mask, PROFILES_TYPE_MASK,
+            "PROFILES_TYPE_MASK must be exactly the OR of PROFILES_PAYLOAD_TYPES"
+        );
+
+        let mut seen = HashSet::new();
+        for &pt in PROFILES_PAYLOAD_TYPES {
+            assert!(RawProfilesStore::is_valid_type(pt));
+            let slot = POSITION_LOOKUP[pt as usize];
+            assert_ne!(slot, UNUSED_INDEX, "{pt:?} has no POSITION_LOOKUP slot");
+            assert!(
+                slot < PROFILES_COUNT,
+                "{pt:?} slot {slot} out of bounds for PROFILES_COUNT"
+            );
+            assert!(
+                seen.insert(slot),
+                "{pt:?} slot {slot} collides with another profiles payload type"
+            );
+        }
+        assert_eq!(seen.len(), PROFILES_COUNT);
     }
 }

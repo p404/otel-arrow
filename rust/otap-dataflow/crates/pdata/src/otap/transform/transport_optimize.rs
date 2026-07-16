@@ -232,10 +232,24 @@ const fn get_column_encodings(
                 encoding: Encoding::DeltaRemapped,
             },
         ],
-        // Profiles transport-optimized encodings are not yet implemented.
+        // Sample is a plain parent-id child of the Profiles root (like the
+        // metric data points, but with no `id` column of its own — nothing
+        // references samples). NOTE for the profiles encode stage: the record
+        // builder must stamp `plain` encoding metadata on parent_id (as the
+        // metrics builders do) — absent metadata is treated as
+        // already-transport-encoded, which would skip the encode here yet
+        // still delta-decode on receive, corrupting the sample→profile join.
+        ArrowPayloadType::Sample => &[ColumnEncoding {
+            path: consts::PARENT_ID,
+            data_type: DataType::UInt16,
+            encoding: Encoding::Delta,
+        }],
+        // The Profiles root has no transport-optimized encodings yet, and the
+        // interned lookup tables (Mapping/Location/Function/Link/String/
+        // AttributeTable/AttributeUnits) are referenced by absolute row index,
+        // so they must never be re-encoded or reordered.
         ArrowPayloadType::Unknown
         | ArrowPayloadType::Profiles
-        | ArrowPayloadType::Sample
         | ArrowPayloadType::MappingTable
         | ArrowPayloadType::LocationTable
         | ArrowPayloadType::FunctionTable
@@ -299,10 +313,15 @@ const fn get_sort_column_paths(payload_type: &ArrowPayloadType) -> &'static [&'s
             consts::METRIC_TYPE,
             consts::NAME,
         ],
-        // Profiles sort-column optimization is not yet implemented.
+        // Sample rows are not referenced by row position, so sorting them by
+        // parent_id (the delta-encoded column) is safe, like the data points.
+        ArrowPayloadType::Sample => &[consts::PARENT_ID],
+        // The Profiles root has no sort optimization yet, and the interned
+        // lookup tables are referenced by ABSOLUTE ROW INDEX from
+        // Profile/Sample/Mapping/Location rows — reordering them would corrupt
+        // every such reference, so their sort paths must stay empty.
         ArrowPayloadType::Unknown
         | ArrowPayloadType::Profiles
-        | ArrowPayloadType::Sample
         | ArrowPayloadType::MappingTable
         | ArrowPayloadType::LocationTable
         | ArrowPayloadType::FunctionTable
@@ -750,15 +769,19 @@ fn remove_parent_id_column_encoding(
             materialize_parent_id_for_exemplars::<u32>(record_batch)
         }
 
+        ArrowPayloadType::Sample => {
+            remove_delta_encoding::<UInt16Type>(record_batch, consts::PARENT_ID)
+        }
+
         ArrowPayloadType::Logs
         | ArrowPayloadType::UnivariateMetrics
         | ArrowPayloadType::MultivariateMetrics
         | ArrowPayloadType::Spans
         | ArrowPayloadType::Unknown
-        // Profiles payload types have no transport-optimized parent ID
-        // encoding defined yet (see `get_column_encodings`).
+        // The Profiles root and the interned lookup tables are the only
+        // profiles payload types without a parent_id column (the tables are
+        // referenced by absolute row index instead).
         | ArrowPayloadType::Profiles
-        | ArrowPayloadType::Sample
         | ArrowPayloadType::MappingTable
         | ArrowPayloadType::LocationTable
         | ArrowPayloadType::FunctionTable
@@ -1041,11 +1064,15 @@ pub fn remove_transport_optimized_encodings(
             materialize_parent_id_for_exemplars::<u32>(&rb)
         }
 
+        ArrowPayloadType::Sample => {
+            remove_delta_encoding::<UInt16Type>(record_batch, consts::PARENT_ID)
+        }
+
         ArrowPayloadType::Unknown
-        // Profiles payload types have no transport-optimized encodings
-        // defined yet (see `get_column_encodings`).
+        // The Profiles root has no transport-optimized encodings yet, and the
+        // interned lookup tables (referenced by absolute row index) are never
+        // encoded or reordered.
         | ArrowPayloadType::Profiles
-        | ArrowPayloadType::Sample
         | ArrowPayloadType::MappingTable
         | ArrowPayloadType::LocationTable
         | ArrowPayloadType::FunctionTable
@@ -1294,7 +1321,7 @@ mod test {
 
     use arrow::{
         array::{
-            FixedSizeBinaryArray, Float64Array, Int64Array, StringArray, StructArray,
+            FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, StringArray, StructArray,
             TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
         },
         datatypes::{Field, Fields, TimeUnit},
@@ -1833,6 +1860,93 @@ mod test {
 
         // assert no parent ID remappings returned
         assert_eq!(result.1, None)
+    }
+
+    #[test]
+    fn test_sample_parent_id_transport_round_trip() {
+        // A profiles Sample batch: parent_id must be stamped `plain` by the
+        // builder (absent metadata means "already transport-encoded"), with
+        // out-of-order parent ids so the sort + delta encoding both fire.
+        let input = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(consts::PARENT_ID, DataType::UInt16, false).with_plain_encoding(),
+                Field::new(consts::LOCATIONS_START_INDEX, DataType::Int32, true),
+            ])),
+            vec![
+                Arc::new(UInt16Array::from_iter_values(vec![2, 0, 3, 1])),
+                Arc::new(Int32Array::from_iter_values(vec![10, 20, 30, 40])),
+            ],
+        )
+        .unwrap();
+
+        let (encoded, remappings) =
+            apply_transport_optimized_encodings(&ArrowPayloadType::Sample, &input).unwrap();
+
+        // Sample has no `id` column, so nothing may be remapped.
+        assert!(remappings.is_none_or(|r| r.is_empty()));
+
+        // Rows sorted by parent_id (0,1,2,3), then parent_id delta-encoded.
+        let parent_id = encoded
+            .column_by_name(consts::PARENT_ID)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .unwrap();
+        assert_eq!(parent_id.values().as_ref(), &[0, 1, 1, 1]);
+        let starts = encoded
+            .column_by_name(consts::LOCATIONS_START_INDEX)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(starts.values().as_ref(), &[20, 40, 10, 30]);
+
+        // Both decode paths must materialize the same plain parent ids.
+        for decoded in [
+            remove_transport_optimized_encodings(ArrowPayloadType::Sample, &encoded).unwrap(),
+            remove_parent_id_column_encoding(&ArrowPayloadType::Sample, &encoded).unwrap(),
+        ] {
+            let parent_id = decoded
+                .column_by_name(consts::PARENT_ID)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .unwrap();
+            assert_eq!(parent_id.values().as_ref(), &[0, 1, 2, 3]);
+            let starts = decoded
+                .column_by_name(consts::LOCATIONS_START_INDEX)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(starts.values().as_ref(), &[20, 40, 10, 30]);
+        }
+    }
+
+    #[test]
+    fn test_profiles_interned_tables_are_never_encoded_or_sorted() {
+        // The interned lookup tables are referenced by ABSOLUTE ROW INDEX from
+        // Profile/Sample/Mapping/Location rows. Encoding or reordering them
+        // would corrupt every such reference; this pins the invariant.
+        for pt in [
+            ArrowPayloadType::Profiles,
+            ArrowPayloadType::MappingTable,
+            ArrowPayloadType::LocationTable,
+            ArrowPayloadType::FunctionTable,
+            ArrowPayloadType::LinkTable,
+            ArrowPayloadType::StringTable,
+            ArrowPayloadType::AttributeTable,
+            ArrowPayloadType::AttributeUnits,
+        ] {
+            assert!(
+                get_column_encodings(&pt).is_empty(),
+                "{pt:?} must have no transport column encodings"
+            );
+            assert!(
+                get_sort_column_paths(&pt).is_empty(),
+                "{pt:?} must never be row-reordered"
+            );
+        }
     }
 
     #[test]

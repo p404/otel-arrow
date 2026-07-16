@@ -1966,16 +1966,33 @@ mod tests {
     };
     use std::sync::Arc;
 
-    /// Return the union of all payload types across Logs, Traces, and Metrics.
+    /// Return the union of all payload types across Logs, Traces, Metrics,
+    /// and Profiles (which has no `OtapBatchStore` impl yet, so its payload
+    /// types come from the raw-store list).
     fn all_payload_types() -> Vec<ArrowPayloadType> {
         Logs::allowed_payload_types()
             .iter()
             .chain(Traces::allowed_payload_types())
             .chain(Metrics::allowed_payload_types())
+            .chain(crate::otap::raw_batch_store::PROFILES_PAYLOAD_TYPES)
             .copied()
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    /// Every profiles payload type must resolve to a real, non-empty schema —
+    /// the validation tests silently skip empty schemas, so a `get()` wiring
+    /// regression (e.g. mapping a profiles type to `Schema::EMPTY`) would
+    /// otherwise pass CI without exercising anything.
+    #[test]
+    fn test_profiles_payload_types_have_non_empty_schemas() {
+        for &pt in crate::otap::raw_batch_store::PROFILES_PAYLOAD_TYPES {
+            assert!(
+                !get(pt).fields().is_empty(),
+                "{pt:?} must map to a non-empty schema"
+            );
+        }
     }
 
     /// Build a 1-element Arrow array for the given OTAP DataType.

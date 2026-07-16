@@ -211,6 +211,9 @@ fn signal_count(records: &[OtapArrowRecords], signal: SignalType) -> usize {
 /// Fetch the primary table for a given batch.
 #[must_use]
 fn primary_table<const N: usize>(batches: &[Option<RecordBatch>; N]) -> Option<&RecordBatch> {
+    // TODO(profiles): add a Profiles::COUNT arm (primary table = Profiles)
+    // when `OtapArrowRecords::Profiles` is wired up, or an 11-slot store will
+    // hit the unreachable fallback at runtime.
     match N {
         Logs::COUNT => batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].as_ref(),
         Metrics::COUNT => {

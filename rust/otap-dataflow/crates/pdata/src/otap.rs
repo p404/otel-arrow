@@ -532,6 +532,9 @@ const DATA_POINTS_TYPES: [ArrowPayloadType; 4] = [
 /// define these.
 #[must_use]
 fn num_items(batches: &[Option<RecordBatch>]) -> usize {
+    // TODO(profiles): add a raw_batch_store::PROFILES_COUNT arm (sample-row
+    // count) when `OtapArrowRecords::Profiles` is wired up, or an 11-slot
+    // store will hit the unreachable fallback at runtime.
     match batches.len() {
         raw_batch_store::LOGS_COUNT => batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]]
             .as_ref()

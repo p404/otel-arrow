@@ -1045,8 +1045,8 @@ mod tests {
             32, // Just after LOG_ATTRS (31)
             39, // Just before SPANS (40)
             46, // Just after SPAN_LINK_ATTRS (45)
-            50, // Well outside any range
-            59, // Just before OTLP range
+            49, // Just before PROFILES (50)
+            59, // Just after ATTRIBUTE_UNITS (58), before OTLP range
         ];
 
         for raw in invalid_slots {
@@ -1073,7 +1073,7 @@ mod tests {
                 || raw == 32
                 || raw == 39
                 || raw == 46
-                || raw == 50
+                || raw == 49
                 || raw == 59
             {
                 assert!(
@@ -1082,6 +1082,25 @@ mod tests {
                     raw
                 );
             }
+        }
+
+        // The profiles payload types (PROFILES=50 through ATTRIBUTE_UNITS=58)
+        // are registered in pdata but not yet routable as a signal (no
+        // `SignalType::Profiles`), so their slots decode to a payload type but
+        // not to a signal. Stage 0b (profiles signal registration) must update
+        // this expectation.
+        for raw in 50..=58 {
+            let slot = SlotId::new(raw);
+            assert!(
+                slot_to_payload_type(slot).is_some(),
+                "slot {} should decode to a profiles payload type",
+                raw
+            );
+            assert!(
+                from_slot_id(slot).is_none(),
+                "slot {} should not yet map to a signal type",
+                raw
+            );
         }
     }
 

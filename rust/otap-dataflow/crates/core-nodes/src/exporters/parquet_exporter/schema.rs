@@ -314,6 +314,22 @@ fn get_template_schema(
         | ArrowPayloadType::HistogramDpExemplarAttrs
         | ArrowPayloadType::NumberDpExemplarAttrs
         | ArrowPayloadType::ExpHistogramDpExemplarAttrs => Ok(&ATTRS_32_TEMPLATE_SCHEMA),
+        // Profiles payload types are registered in pdata but not yet routable
+        // (no `OtapArrowRecords::Profiles` variant), so no template schemas
+        // exist for them yet.
+        ArrowPayloadType::Profiles
+        | ArrowPayloadType::Sample
+        | ArrowPayloadType::MappingTable
+        | ArrowPayloadType::LocationTable
+        | ArrowPayloadType::FunctionTable
+        | ArrowPayloadType::LinkTable
+        | ArrowPayloadType::StringTable
+        | ArrowPayloadType::AttributeTable
+        | ArrowPayloadType::AttributeUnits => Err(ParquetExporterError::InvalidRecordBatch {
+            error: format!(
+                "Parquet export is not yet supported for OTAP payload type {payload_type:?}"
+            ),
+        }),
         ArrowPayloadType::Unknown => Err(ParquetExporterError::InvalidRecordBatch {
             error: "Cannot convert schema for OTAP Payload type Unknown".to_string(),
         }),
