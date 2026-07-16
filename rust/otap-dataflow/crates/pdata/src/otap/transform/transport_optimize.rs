@@ -232,7 +232,17 @@ const fn get_column_encodings(
                 encoding: Encoding::DeltaRemapped,
             },
         ],
-        ArrowPayloadType::Unknown => &[],
+        // Profiles transport-optimized encodings are not yet implemented.
+        ArrowPayloadType::Unknown
+        | ArrowPayloadType::Profiles
+        | ArrowPayloadType::Sample
+        | ArrowPayloadType::MappingTable
+        | ArrowPayloadType::LocationTable
+        | ArrowPayloadType::FunctionTable
+        | ArrowPayloadType::LinkTable
+        | ArrowPayloadType::StringTable
+        | ArrowPayloadType::AttributeTable
+        | ArrowPayloadType::AttributeUnits => &[],
     }
 }
 
@@ -289,7 +299,17 @@ const fn get_sort_column_paths(payload_type: &ArrowPayloadType) -> &'static [&'s
             consts::METRIC_TYPE,
             consts::NAME,
         ],
-        ArrowPayloadType::Unknown => &[],
+        // Profiles sort-column optimization is not yet implemented.
+        ArrowPayloadType::Unknown
+        | ArrowPayloadType::Profiles
+        | ArrowPayloadType::Sample
+        | ArrowPayloadType::MappingTable
+        | ArrowPayloadType::LocationTable
+        | ArrowPayloadType::FunctionTable
+        | ArrowPayloadType::LinkTable
+        | ArrowPayloadType::StringTable
+        | ArrowPayloadType::AttributeTable
+        | ArrowPayloadType::AttributeUnits => &[],
     }
 }
 
@@ -734,7 +754,18 @@ fn remove_parent_id_column_encoding(
         | ArrowPayloadType::UnivariateMetrics
         | ArrowPayloadType::MultivariateMetrics
         | ArrowPayloadType::Spans
-        | ArrowPayloadType::Unknown => {
+        | ArrowPayloadType::Unknown
+        // Profiles payload types have no transport-optimized parent ID
+        // encoding defined yet (see `get_column_encodings`).
+        | ArrowPayloadType::Profiles
+        | ArrowPayloadType::Sample
+        | ArrowPayloadType::MappingTable
+        | ArrowPayloadType::LocationTable
+        | ArrowPayloadType::FunctionTable
+        | ArrowPayloadType::LinkTable
+        | ArrowPayloadType::StringTable
+        | ArrowPayloadType::AttributeTable
+        | ArrowPayloadType::AttributeUnits => {
             // nothing to do b/c there are no parent ID field for these payload types
             Ok(record_batch.clone())
         }
@@ -1010,7 +1041,18 @@ pub fn remove_transport_optimized_encodings(
             materialize_parent_id_for_exemplars::<u32>(&rb)
         }
 
-        ArrowPayloadType::Unknown => {
+        ArrowPayloadType::Unknown
+        // Profiles payload types have no transport-optimized encodings
+        // defined yet (see `get_column_encodings`).
+        | ArrowPayloadType::Profiles
+        | ArrowPayloadType::Sample
+        | ArrowPayloadType::MappingTable
+        | ArrowPayloadType::LocationTable
+        | ArrowPayloadType::FunctionTable
+        | ArrowPayloadType::LinkTable
+        | ArrowPayloadType::StringTable
+        | ArrowPayloadType::AttributeTable
+        | ArrowPayloadType::AttributeUnits => {
             // do nothing
             Ok(record_batch.clone())
         }

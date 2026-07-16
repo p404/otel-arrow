@@ -1052,7 +1052,23 @@ pub const fn parent_payload_type(payload_type: ArrowPayloadType) -> Option<Paren
         | ArrowPayloadType::Spans
         | ArrowPayloadType::UnivariateMetrics
         | ArrowPayloadType::MultivariateMetrics
-        | ArrowPayloadType::Unknown => None,
+        | ArrowPayloadType::Unknown
+        | ArrowPayloadType::Profiles => None,
+        // The profiles lookup tables (Mapping/Location/Function/Link/String/
+        // AttributeTable/AttributeUnits) are referenced by numeric index from
+        // Profile/Sample/Mapping/Location rows, not by a `parent_id` join, so
+        // they have no parent payload type in this join-based sense. This
+        // function isn't yet reachable for any profiles payload type (there
+        // is no `OtapArrowRecords::Profiles` variant routing through it);
+        // revisit if/when profiles are wired into the filter/reindex helpers
+        // that consume this function.
+        ArrowPayloadType::MappingTable
+        | ArrowPayloadType::LocationTable
+        | ArrowPayloadType::FunctionTable
+        | ArrowPayloadType::LinkTable
+        | ArrowPayloadType::StringTable
+        | ArrowPayloadType::AttributeTable
+        | ArrowPayloadType::AttributeUnits => None,
         ArrowPayloadType::ResourceAttrs
         | ArrowPayloadType::ScopeAttrs
         | ArrowPayloadType::LogAttrs
@@ -1063,7 +1079,8 @@ pub const fn parent_payload_type(payload_type: ArrowPayloadType) -> Option<Paren
         | ArrowPayloadType::NumberDataPoints
         | ArrowPayloadType::SummaryDataPoints
         | ArrowPayloadType::HistogramDataPoints
-        | ArrowPayloadType::ExpHistogramDataPoints => Some(ParentPayloadType::Root),
+        | ArrowPayloadType::ExpHistogramDataPoints
+        | ArrowPayloadType::Sample => Some(ParentPayloadType::Root),
         ArrowPayloadType::SpanEventAttrs => {
             Some(ParentPayloadType::NonRoot(ArrowPayloadType::SpanEvents))
         }

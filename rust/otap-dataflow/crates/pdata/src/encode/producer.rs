@@ -142,11 +142,11 @@ impl StreamProducer {
     }
 }
 
-const PAYLOAD_TYPE_COUNT: usize = 28; // 28 variants total
+const PAYLOAD_TYPE_COUNT: usize = 37; // 37 variants total
 
 // Compile-time lookup table for O(1) conversion
-const PAYLOAD_TYPE_TO_INDEX: [Option<u8>; 46] = {
-    let mut table = [None; 46];
+const PAYLOAD_TYPE_TO_INDEX: [Option<u8>; 59] = {
+    let mut table = [None; 59];
     table[0] = Some(0); // Unknown
     table[1] = Some(1); // ResourceAttrs
     table[2] = Some(2); // ScopeAttrs
@@ -175,6 +175,15 @@ const PAYLOAD_TYPE_TO_INDEX: [Option<u8>; 46] = {
     table[43] = Some(25); // SpanLinks
     table[44] = Some(26); // SpanEventAttrs
     table[45] = Some(27); // SpanLinkAttrs
+    table[50] = Some(28); // Profiles
+    table[51] = Some(29); // Sample
+    table[52] = Some(30); // MappingTable
+    table[53] = Some(31); // LocationTable
+    table[54] = Some(32); // FunctionTable
+    table[55] = Some(33); // LinkTable
+    table[56] = Some(34); // StringTable
+    table[57] = Some(35); // AttributeTable
+    table[58] = Some(36); // AttributeUnits
     table
 };
 
@@ -600,6 +609,15 @@ mod test {
                 ArrowPayloadType::SpanLinks => 25,
                 ArrowPayloadType::SpanEventAttrs => 26,
                 ArrowPayloadType::SpanLinkAttrs => 27,
+                ArrowPayloadType::Profiles => 28,
+                ArrowPayloadType::Sample => 29,
+                ArrowPayloadType::MappingTable => 30,
+                ArrowPayloadType::LocationTable => 31,
+                ArrowPayloadType::FunctionTable => 32,
+                ArrowPayloadType::LinkTable => 33,
+                ArrowPayloadType::StringTable => 34,
+                ArrowPayloadType::AttributeTable => 35,
+                ArrowPayloadType::AttributeUnits => 36,
                 // No wildcard pattern - compiler will error if new variants are added
             }
         }
@@ -634,6 +652,15 @@ mod test {
             ArrowPayloadType::SpanLinks,
             ArrowPayloadType::SpanEventAttrs,
             ArrowPayloadType::SpanLinkAttrs,
+            ArrowPayloadType::Profiles,
+            ArrowPayloadType::Sample,
+            ArrowPayloadType::MappingTable,
+            ArrowPayloadType::LocationTable,
+            ArrowPayloadType::FunctionTable,
+            ArrowPayloadType::LinkTable,
+            ArrowPayloadType::StringTable,
+            ArrowPayloadType::AttributeTable,
+            ArrowPayloadType::AttributeUnits,
         ] {
             let expected_index = exhaustive_check(variant);
             let actual_index = variant.to_index();

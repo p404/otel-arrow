@@ -73,6 +73,46 @@ pub const ATTRIBUTE_BOOL: &str = "bool";
 pub const ATTRIBUTE_BYTES: &str = "bytes";
 pub const ATTRIBUTE_SER: &str = "ser";
 
+// Profiles
+pub const TIME_NANOS: &str = "time_nanos";
+pub const DURATION_NANOS: &str = "duration_nanos";
+pub const PERIOD: &str = "period";
+pub const PERIOD_TYPE: &str = "period_type";
+pub const TYPE_STRINDEX: &str = "type_strindex";
+pub const UNIT_STRINDEX: &str = "unit_strindex";
+pub const DEFAULT_SAMPLE_TYPE_INDEX: &str = "default_sample_type_index";
+pub const PROFILE_ID: &str = "profile_id";
+pub const ORIGINAL_PAYLOAD_FORMAT: &str = "original_payload_format";
+pub const ORIGINAL_PAYLOAD: &str = "original_payload";
+pub const SAMPLE_TYPE: &str = "sample_type";
+pub const LOCATION_INDICES: &str = "location_indices";
+pub const COMMENT_STRINDICES: &str = "comment_strindices";
+pub const ATTRIBUTE_INDICES: &str = "attribute_indices";
+pub const LOCATIONS_START_INDEX: &str = "locations_start_index";
+pub const LOCATIONS_LENGTH: &str = "locations_length";
+pub const SAMPLE_VALUE: &str = "value";
+pub const LINK_INDEX: &str = "link_index";
+pub const TIMESTAMPS_UNIX_NANO: &str = "timestamps_unix_nano";
+pub const STRING_TABLE_VALUE: &str = "value";
+pub const MEMORY_START: &str = "memory_start";
+pub const MEMORY_LIMIT: &str = "memory_limit";
+pub const FILE_OFFSET: &str = "file_offset";
+pub const FILENAME_STRINDEX: &str = "filename_strindex";
+pub const HAS_FUNCTIONS: &str = "has_functions";
+pub const HAS_FILENAMES: &str = "has_filenames";
+pub const HAS_LINE_NUMBERS: &str = "has_line_numbers";
+pub const HAS_INLINE_FRAMES: &str = "has_inline_frames";
+pub const MAPPING_INDEX: &str = "mapping_index";
+pub const ADDRESS: &str = "address";
+pub const IS_FOLDED: &str = "is_folded";
+pub const LINE: &str = "line";
+pub const FUNCTION_INDEX: &str = "function_index";
+pub const COLUMN: &str = "column";
+pub const NAME_STRINDEX: &str = "name_strindex";
+pub const SYSTEM_NAME_STRINDEX: &str = "system_name_strindex";
+pub const START_LINE: &str = "start_line";
+pub const ATTRIBUTE_KEY_STRINDEX: &str = "attribute_key_strindex";
+
 pub mod metadata {
     /// schema metadata for which columns the record batch is sorted by
     pub const SORT_COLUMNS: &str = "sort_columns";

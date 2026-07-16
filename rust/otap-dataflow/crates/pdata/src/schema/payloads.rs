@@ -52,6 +52,20 @@ pub fn get(typ: ArrowPayloadType) -> &'static Schema {
         // Common
         ArrowPayloadType::ResourceAttrs => &attributes_16::SCHEMA,
         ArrowPayloadType::ScopeAttrs => &attributes_16::SCHEMA,
+
+        // Profiles
+        ArrowPayloadType::Profiles => &profiles::SCHEMA,
+        ArrowPayloadType::Sample => &sample::SCHEMA,
+        ArrowPayloadType::MappingTable => &mapping_table::SCHEMA,
+        ArrowPayloadType::LocationTable => &location_table::SCHEMA,
+        ArrowPayloadType::FunctionTable => &function_table::SCHEMA,
+        ArrowPayloadType::LinkTable => &link_table::SCHEMA,
+        ArrowPayloadType::StringTable => &string_table::SCHEMA,
+        // The profiles attribute table is a flat, index-referenced table of
+        // key/type/value columns identical in shape to the existing 32-bit
+        // parent-id attribute tables, so it is reused rather than duplicated.
+        ArrowPayloadType::AttributeTable => &attributes_32::SCHEMA,
+        ArrowPayloadType::AttributeUnits => &attribute_units::SCHEMA,
     }
 }
 
@@ -1300,6 +1314,550 @@ mod exemplars {
             SPAN_ID => Some(4),
             TIME_UNIX_NANO => Some(5),
             TRACE_ID => Some(6),
+            _ => None,
+        }
+    }
+}
+
+mod profiles {
+    use super::*;
+
+    // Shared shape for `period_type` and each item of the `sample_type` list;
+    // matches `opentelemetry.proto.profiles.v1development.ValueType`.
+    static VALUE_TYPE_SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: TYPE_STRINDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: UNIT_STRINDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: AGGREGATION_TEMPORALITY,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+        ],
+        idx: value_type_idx,
+    };
+
+    fn value_type_idx(name: &str) -> Option<usize> {
+        match name {
+            TYPE_STRINDEX => Some(0),
+            UNIT_STRINDEX => Some(1),
+            AGGREGATION_TEMPORALITY => Some(2),
+            _ => None,
+        }
+    }
+
+    static SAMPLE_TYPE_ITEM_DT: DataType = DataType::Struct(&VALUE_TYPE_SCHEMA);
+    static LOCATION_INDICES_ITEM_DT: DataType = DataType::Simple(Int32);
+    static COMMENT_STRINDICES_ITEM_DT: DataType = DataType::Simple(Int32);
+    static ATTRIBUTE_INDICES_ITEM_DT: DataType = DataType::Simple(Int32);
+
+    /// One row per `Profile`. Resource/scope/schema_url are flattened onto
+    /// the row following the same convention as `logs`/`spans`/
+    /// `univariate_metrics`.
+    pub(super) static SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: ID,
+                data_type: DataType::Simple(UInt16),
+                required: false,
+            },
+            Field {
+                name: RESOURCE,
+                data_type: DataType::Struct(&RESOURCE_SCHEMA),
+                required: false,
+            },
+            Field {
+                name: SCOPE,
+                data_type: DataType::Struct(&SCOPE_SCHEMA),
+                required: false,
+            },
+            Field {
+                name: SCHEMA_URL,
+                data_type: DataType::Dictionary {
+                    min_key_size: DictKeySize::U8,
+                    value_type: Utf8,
+                },
+                required: false,
+            },
+            Field {
+                name: TIME_NANOS,
+                data_type: DataType::Simple(TimestampNanosecond),
+                required: false,
+            },
+            Field {
+                name: DURATION_NANOS,
+                data_type: DataType::Simple(Int64),
+                required: false,
+            },
+            Field {
+                name: PERIOD,
+                data_type: DataType::Simple(Int64),
+                required: false,
+            },
+            Field {
+                name: PERIOD_TYPE,
+                data_type: DataType::Struct(&VALUE_TYPE_SCHEMA),
+                required: false,
+            },
+            Field {
+                name: DEFAULT_SAMPLE_TYPE_INDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: PROFILE_ID,
+                data_type: DataType::Simple(FixedSizeBinary(16)),
+                required: false,
+            },
+            Field {
+                name: DROPPED_ATTRIBUTES_COUNT,
+                data_type: DataType::Simple(UInt32),
+                required: false,
+            },
+            Field {
+                name: ORIGINAL_PAYLOAD_FORMAT,
+                data_type: DataType::Dictionary {
+                    min_key_size: DictKeySize::U8,
+                    value_type: Utf8,
+                },
+                required: false,
+            },
+            Field {
+                name: ORIGINAL_PAYLOAD,
+                data_type: DataType::Simple(Binary),
+                required: false,
+            },
+            Field {
+                name: SAMPLE_TYPE,
+                data_type: DataType::List(&SAMPLE_TYPE_ITEM_DT),
+                required: false,
+            },
+            Field {
+                name: LOCATION_INDICES,
+                data_type: DataType::List(&LOCATION_INDICES_ITEM_DT),
+                required: false,
+            },
+            Field {
+                name: COMMENT_STRINDICES,
+                data_type: DataType::List(&COMMENT_STRINDICES_ITEM_DT),
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_INDICES,
+                data_type: DataType::List(&ATTRIBUTE_INDICES_ITEM_DT),
+                required: false,
+            },
+        ],
+        idx,
+    };
+
+    fn idx(name: &str) -> Option<usize> {
+        match name {
+            ID => Some(0),
+            RESOURCE => Some(1),
+            SCOPE => Some(2),
+            SCHEMA_URL => Some(3),
+            TIME_NANOS => Some(4),
+            DURATION_NANOS => Some(5),
+            PERIOD => Some(6),
+            PERIOD_TYPE => Some(7),
+            DEFAULT_SAMPLE_TYPE_INDEX => Some(8),
+            PROFILE_ID => Some(9),
+            DROPPED_ATTRIBUTES_COUNT => Some(10),
+            ORIGINAL_PAYLOAD_FORMAT => Some(11),
+            ORIGINAL_PAYLOAD => Some(12),
+            SAMPLE_TYPE => Some(13),
+            LOCATION_INDICES => Some(14),
+            COMMENT_STRINDICES => Some(15),
+            ATTRIBUTE_INDICES => Some(16),
+            _ => None,
+        }
+    }
+}
+
+mod sample {
+    use super::*;
+
+    static VALUE_ITEM_DT: DataType = DataType::Simple(Int64);
+    static ATTRIBUTE_INDICES_ITEM_DT: DataType = DataType::Simple(Int32);
+    static TIMESTAMPS_ITEM_DT: DataType = DataType::Simple(UInt64);
+
+    /// One row per `Sample`, keyed to its owning `Profile` via `parent_id`.
+    pub(super) static SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: PARENT_ID,
+                data_type: DataType::Simple(UInt16),
+                required: true,
+            },
+            Field {
+                name: LOCATIONS_START_INDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: LOCATIONS_LENGTH,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: SAMPLE_VALUE,
+                data_type: DataType::List(&VALUE_ITEM_DT),
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_INDICES,
+                data_type: DataType::List(&ATTRIBUTE_INDICES_ITEM_DT),
+                required: false,
+            },
+            Field {
+                name: LINK_INDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: TIMESTAMPS_UNIX_NANO,
+                data_type: DataType::List(&TIMESTAMPS_ITEM_DT),
+                required: false,
+            },
+        ],
+        idx,
+    };
+
+    fn idx(name: &str) -> Option<usize> {
+        match name {
+            PARENT_ID => Some(0),
+            LOCATIONS_START_INDEX => Some(1),
+            LOCATIONS_LENGTH => Some(2),
+            SAMPLE_VALUE => Some(3),
+            ATTRIBUTE_INDICES => Some(4),
+            LINK_INDEX => Some(5),
+            TIMESTAMPS_UNIX_NANO => Some(6),
+            _ => None,
+        }
+    }
+}
+
+mod string_table {
+    use super::*;
+
+    /// One row per entry of `ProfilesData.string_table`. There is no
+    /// dedicated proto message for this table (it's a flat `repeated
+    /// string`); `id` is the synthetic row position, following the same
+    /// convention as the other profiles lookup tables.
+    pub(super) static SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: ID,
+                data_type: DataType::Simple(UInt32),
+                required: false,
+            },
+            Field {
+                name: STRING_TABLE_VALUE,
+                data_type: DataType::Dictionary {
+                    min_key_size: DictKeySize::U8,
+                    value_type: Utf8,
+                },
+                required: false,
+            },
+        ],
+        idx,
+    };
+
+    fn idx(name: &str) -> Option<usize> {
+        match name {
+            ID => Some(0),
+            STRING_TABLE_VALUE => Some(1),
+            _ => None,
+        }
+    }
+}
+
+mod function_table {
+    use super::*;
+
+    /// One row per entry of `ProfilesData.function_table`.
+    pub(super) static SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: ID,
+                data_type: DataType::Simple(UInt32),
+                required: false,
+            },
+            Field {
+                name: NAME_STRINDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: SYSTEM_NAME_STRINDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: FILENAME_STRINDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: START_LINE,
+                data_type: DataType::Simple(Int64),
+                required: false,
+            },
+        ],
+        idx,
+    };
+
+    fn idx(name: &str) -> Option<usize> {
+        match name {
+            ID => Some(0),
+            NAME_STRINDEX => Some(1),
+            SYSTEM_NAME_STRINDEX => Some(2),
+            FILENAME_STRINDEX => Some(3),
+            START_LINE => Some(4),
+            _ => None,
+        }
+    }
+}
+
+mod mapping_table {
+    use super::*;
+
+    static ATTRIBUTE_INDICES_ITEM_DT: DataType = DataType::Simple(Int32);
+
+    /// One row per entry of `ProfilesData.mapping_table`.
+    pub(super) static SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: ID,
+                data_type: DataType::Simple(UInt32),
+                required: false,
+            },
+            Field {
+                name: MEMORY_START,
+                data_type: DataType::Simple(UInt64),
+                required: false,
+            },
+            Field {
+                name: MEMORY_LIMIT,
+                data_type: DataType::Simple(UInt64),
+                required: false,
+            },
+            Field {
+                name: FILE_OFFSET,
+                data_type: DataType::Simple(UInt64),
+                required: false,
+            },
+            Field {
+                name: FILENAME_STRINDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: HAS_FUNCTIONS,
+                data_type: DataType::Simple(Boolean),
+                required: false,
+            },
+            Field {
+                name: HAS_FILENAMES,
+                data_type: DataType::Simple(Boolean),
+                required: false,
+            },
+            Field {
+                name: HAS_LINE_NUMBERS,
+                data_type: DataType::Simple(Boolean),
+                required: false,
+            },
+            Field {
+                name: HAS_INLINE_FRAMES,
+                data_type: DataType::Simple(Boolean),
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_INDICES,
+                data_type: DataType::List(&ATTRIBUTE_INDICES_ITEM_DT),
+                required: false,
+            },
+        ],
+        idx,
+    };
+
+    fn idx(name: &str) -> Option<usize> {
+        match name {
+            ID => Some(0),
+            MEMORY_START => Some(1),
+            MEMORY_LIMIT => Some(2),
+            FILE_OFFSET => Some(3),
+            FILENAME_STRINDEX => Some(4),
+            HAS_FUNCTIONS => Some(5),
+            HAS_FILENAMES => Some(6),
+            HAS_LINE_NUMBERS => Some(7),
+            HAS_INLINE_FRAMES => Some(8),
+            ATTRIBUTE_INDICES => Some(9),
+            _ => None,
+        }
+    }
+}
+
+mod location_table {
+    use super::*;
+
+    static LINE_ITEM_SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: FUNCTION_INDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: LINE,
+                data_type: DataType::Simple(Int64),
+                required: false,
+            },
+            Field {
+                name: COLUMN,
+                data_type: DataType::Simple(Int64),
+                required: false,
+            },
+        ],
+        idx: line_item_idx,
+    };
+
+    fn line_item_idx(name: &str) -> Option<usize> {
+        match name {
+            FUNCTION_INDEX => Some(0),
+            LINE => Some(1),
+            COLUMN => Some(2),
+            _ => None,
+        }
+    }
+
+    static LINE_ITEM_DT: DataType = DataType::Struct(&LINE_ITEM_SCHEMA);
+    static ATTRIBUTE_INDICES_ITEM_DT: DataType = DataType::Simple(Int32);
+
+    /// One row per entry of `ProfilesData.location_table`.
+    pub(super) static SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: ID,
+                data_type: DataType::Simple(UInt32),
+                required: false,
+            },
+            Field {
+                name: MAPPING_INDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: ADDRESS,
+                data_type: DataType::Simple(UInt64),
+                required: false,
+            },
+            Field {
+                name: IS_FOLDED,
+                data_type: DataType::Simple(Boolean),
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_INDICES,
+                data_type: DataType::List(&ATTRIBUTE_INDICES_ITEM_DT),
+                required: false,
+            },
+            Field {
+                name: LINE,
+                data_type: DataType::List(&LINE_ITEM_DT),
+                required: false,
+            },
+        ],
+        idx,
+    };
+
+    fn idx(name: &str) -> Option<usize> {
+        match name {
+            ID => Some(0),
+            MAPPING_INDEX => Some(1),
+            ADDRESS => Some(2),
+            IS_FOLDED => Some(3),
+            ATTRIBUTE_INDICES => Some(4),
+            LINE => Some(5),
+            _ => None,
+        }
+    }
+}
+
+mod link_table {
+    use super::*;
+
+    /// One row per entry of `ProfilesData.link_table`.
+    pub(super) static SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: ID,
+                data_type: DataType::Simple(UInt32),
+                required: false,
+            },
+            Field {
+                name: TRACE_ID,
+                data_type: DataType::Simple(FixedSizeBinary(16)),
+                required: false,
+            },
+            Field {
+                name: SPAN_ID,
+                data_type: DataType::Simple(FixedSizeBinary(8)),
+                required: false,
+            },
+        ],
+        idx,
+    };
+
+    fn idx(name: &str) -> Option<usize> {
+        match name {
+            ID => Some(0),
+            TRACE_ID => Some(1),
+            SPAN_ID => Some(2),
+            _ => None,
+        }
+    }
+}
+
+mod attribute_units {
+    use super::*;
+
+    /// One row per entry of `ProfilesData.attribute_units`.
+    pub(super) static SCHEMA: Schema = Schema {
+        fields: &[
+            Field {
+                name: ID,
+                data_type: DataType::Simple(UInt32),
+                required: false,
+            },
+            Field {
+                name: ATTRIBUTE_KEY_STRINDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+            Field {
+                name: UNIT_STRINDEX,
+                data_type: DataType::Simple(Int32),
+                required: false,
+            },
+        ],
+        idx,
+    };
+
+    fn idx(name: &str) -> Option<usize> {
+        match name {
+            ID => Some(0),
+            ATTRIBUTE_KEY_STRINDEX => Some(1),
+            UNIT_STRINDEX => Some(2),
             _ => None,
         }
     }

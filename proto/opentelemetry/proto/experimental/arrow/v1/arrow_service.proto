@@ -100,6 +100,17 @@ enum ArrowPayloadType {
   SPAN_LINKS = 43;
   SPAN_EVENT_ATTRS = 44;
   SPAN_LINK_ATTRS = 45;
+
+  // A set of payloads representing a collection of profiles.
+  PROFILES = 50;
+  SAMPLE = 51;
+  MAPPING_TABLE = 52;
+  LOCATION_TABLE = 53;
+  FUNCTION_TABLE = 54;
+  LINK_TABLE = 55;
+  STRING_TABLE = 56;
+  ATTRIBUTE_TABLE = 57;
+  ATTRIBUTE_UNITS = 58;
 }
 
 // Represents a batch of OTel Arrow entities.

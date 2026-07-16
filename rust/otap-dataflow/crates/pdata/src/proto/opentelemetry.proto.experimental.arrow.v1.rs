@@ -57,6 +57,15 @@ pub enum ArrowPayloadType {
     SpanLinks = 43,
     SpanEventAttrs = 44,
     SpanLinkAttrs = 45,
+    Profiles = 50,
+    Sample = 51,
+    MappingTable = 52,
+    LocationTable = 53,
+    FunctionTable = 54,
+    LinkTable = 55,
+    StringTable = 56,
+    AttributeTable = 57,
+    AttributeUnits = 58,
 }
 impl ArrowPayloadType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -93,6 +102,15 @@ impl ArrowPayloadType {
             Self::SpanLinks => "SPAN_LINKS",
             Self::SpanEventAttrs => "SPAN_EVENT_ATTRS",
             Self::SpanLinkAttrs => "SPAN_LINK_ATTRS",
+            Self::Profiles => "PROFILES",
+            Self::Sample => "SAMPLE",
+            Self::MappingTable => "MAPPING_TABLE",
+            Self::LocationTable => "LOCATION_TABLE",
+            Self::FunctionTable => "FUNCTION_TABLE",
+            Self::LinkTable => "LINK_TABLE",
+            Self::StringTable => "STRING_TABLE",
+            Self::AttributeTable => "ATTRIBUTE_TABLE",
+            Self::AttributeUnits => "ATTRIBUTE_UNITS",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -126,6 +144,15 @@ impl ArrowPayloadType {
             "SPAN_LINKS" => Some(Self::SpanLinks),
             "SPAN_EVENT_ATTRS" => Some(Self::SpanEventAttrs),
             "SPAN_LINK_ATTRS" => Some(Self::SpanLinkAttrs),
+            "PROFILES" => Some(Self::Profiles),
+            "SAMPLE" => Some(Self::Sample),
+            "MAPPING_TABLE" => Some(Self::MappingTable),
+            "LOCATION_TABLE" => Some(Self::LocationTable),
+            "FUNCTION_TABLE" => Some(Self::FunctionTable),
+            "LINK_TABLE" => Some(Self::LinkTable),
+            "STRING_TABLE" => Some(Self::StringTable),
+            "ATTRIBUTE_TABLE" => Some(Self::AttributeTable),
+            "ATTRIBUTE_UNITS" => Some(Self::AttributeUnits),
             _ => None,
         }
     }

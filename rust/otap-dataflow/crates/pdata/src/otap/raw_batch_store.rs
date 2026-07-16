@@ -69,12 +69,26 @@ pub const POSITION_LOOKUP: &[usize] = &[
     UNUSED_INDEX, // 38
     UNUSED_INDEX, // 39
     // traces:
-    2, // Spans = 40,
-    3, // SpanAttrs = 41,
-    4, // SpanEvents = 42,
-    5, // SpanLinks = 43,
-    6, // SpanEventAttrs = 44,
-    7, // SpanLinkAttrs = 45,
+    2,            // Spans = 40,
+    3,            // SpanAttrs = 41,
+    4,            // SpanEvents = 42,
+    5,            // SpanLinks = 43,
+    6,            // SpanEventAttrs = 44,
+    7,            // SpanLinkAttrs = 45,
+    UNUSED_INDEX, // 46
+    UNUSED_INDEX, // 47
+    UNUSED_INDEX, // 48
+    UNUSED_INDEX, // 49
+    // profiles:
+    0, // Profiles = 50,
+    1, // Sample = 51,
+    2, // MappingTable = 52,
+    3, // LocationTable = 53,
+    4, // FunctionTable = 54,
+    5, // LinkTable = 55,
+    6, // StringTable = 56,
+    7, // AttributeTable = 57,
+    8, // AttributeUnits = 58,
 ];
 
 // ---------------------------------------------------------------------------
@@ -127,6 +141,25 @@ pub const TRACES_TYPE_MASK: u64 = (1 << ArrowPayloadType::ResourceAttrs as u64)
 /// Number of payload slots for the Traces signal.
 pub const TRACES_COUNT: usize = 8;
 
+/// Bitmask of valid [`ArrowPayloadType`] values for the Profiles signal.
+///
+/// Not yet wired up to an `OtapArrowRecords::Profiles` variant (Stage 0a is
+/// pdata-schema-only); reserved for a later stage.
+#[allow(dead_code)]
+pub const PROFILES_TYPE_MASK: u64 = (1 << ArrowPayloadType::Profiles as u64)
+    + (1 << ArrowPayloadType::Sample as u64)
+    + (1 << ArrowPayloadType::MappingTable as u64)
+    + (1 << ArrowPayloadType::LocationTable as u64)
+    + (1 << ArrowPayloadType::FunctionTable as u64)
+    + (1 << ArrowPayloadType::LinkTable as u64)
+    + (1 << ArrowPayloadType::StringTable as u64)
+    + (1 << ArrowPayloadType::AttributeTable as u64)
+    + (1 << ArrowPayloadType::AttributeUnits as u64);
+
+/// Number of payload slots for the Profiles signal.
+#[allow(dead_code)]
+pub const PROFILES_COUNT: usize = 9;
+
 // ---------------------------------------------------------------------------
 // Type aliases
 // ---------------------------------------------------------------------------
@@ -139,6 +172,13 @@ pub type RawMetricsStore = RawBatchStore<METRICS_TYPE_MASK, METRICS_COUNT>;
 
 /// Raw (unvalidated) batch store for the Traces signal.
 pub type RawTracesStore = RawBatchStore<TRACES_TYPE_MASK, TRACES_COUNT>;
+
+/// Raw (unvalidated) batch store for the Profiles signal.
+///
+/// Not yet wired up to an `OtapArrowRecords::Profiles` variant (Stage 0a is
+/// pdata-schema-only); reserved for a later stage.
+#[allow(dead_code)]
+pub type RawProfilesStore = RawBatchStore<PROFILES_TYPE_MASK, PROFILES_COUNT>;
 
 // ---------------------------------------------------------------------------
 // RawBatchStore
