@@ -93,6 +93,9 @@ pub fn route_ack_response(states: &AckRegistry, ack: AckMsg<OtapPdata>) -> Route
         SignalType::Logs => states.logs.as_ref(),
         SignalType::Metrics => states.metrics.as_ref(),
         SignalType::Traces => states.traces.as_ref(),
+        // No OTLP profiles gRPC service is registered yet, so there is no
+        // subscription map to route through.
+        SignalType::Profiles => None,
     };
 
     state
@@ -110,6 +113,9 @@ pub fn route_nack_response(states: &AckRegistry, mut nack: NackMsg<OtapPdata>) -
         SignalType::Logs => states.logs.as_ref(),
         SignalType::Metrics => states.metrics.as_ref(),
         SignalType::Traces => states.traces.as_ref(),
+        // No OTLP profiles gRPC service is registered yet, so there is no
+        // subscription map to route through.
+        SignalType::Profiles => None,
     };
 
     state

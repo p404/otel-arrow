@@ -334,6 +334,40 @@ pub struct DurableBufferMetrics {
     /// Metric data points lost due to expired segments (max_age retention).
     #[metric(unit = "{data_point}")]
     pub expired_metric_datapoints: Counter<u64>,
+
+    // ─── Profiles item metrics ───────────────────────────────────────────────
+    // Appended at the end (rather than alongside their logs/metrics/traces
+    // siblings above) to preserve the existing positional indices of every
+    // metric declared before this point -- `test_nack_metrics_snapshot_field_positions`
+    // and several other tests read `MetricSet::get_metrics()` by hardcoded
+    // index, and reordering fields silently shifts those indices.
+    /// Number of profile samples rejected.
+    #[metric(unit = "{sample}")]
+    pub rejected_profile_samples: Counter<u64>,
+
+    /// Number of profile samples consumed (ingested to durable storage).
+    #[metric(unit = "{sample}")]
+    pub consumed_profile_samples: Counter<u64>,
+
+    /// Number of profile samples produced (sent downstream).
+    #[metric(unit = "{sample}")]
+    pub produced_profile_samples: Counter<u64>,
+
+    /// Number of individual profile samples requeued for retry after NACK.
+    #[metric(unit = "{sample}")]
+    pub requeued_profile_samples: Counter<u64>,
+
+    /// Current number of profile samples queued (ingested but not yet ACKed).
+    #[metric(unit = "{sample}")]
+    pub queued_profile_samples: Gauge<u64>,
+
+    /// Profile samples lost due to force-dropped segments (DropOldest policy).
+    #[metric(unit = "{sample}")]
+    pub dropped_profile_samples: Counter<u64>,
+
+    /// Profile samples lost due to expired segments (max_age retention).
+    #[metric(unit = "{sample}")]
+    pub expired_profile_samples: Counter<u64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -438,6 +472,7 @@ struct SegmentMetricsSummary {
     total_logs: u64,
     total_metrics: u64,
     total_spans: u64,
+    total_profiles: u64,
 }
 
 /// Cached segment summary with recency tracking for bounded eviction.
@@ -827,6 +862,7 @@ impl DurableBuffer {
         let mut logs = 0u64;
         let mut metrics = 0u64;
         let mut spans = 0u64;
+        let mut profiles = 0u64;
 
         // Step 2: iterate finalized segments, populating cache on miss.
         for (&seg_seq, progress) in &progress_snapshot {
@@ -849,6 +885,7 @@ impl DurableBuffer {
                             let mut tl = 0u64;
                             let mut tm = 0u64;
                             let mut ts = 0u64;
+                            let mut tp = 0u64;
 
                             let bundles: Vec<_> = metadata
                                 .iter()
@@ -862,6 +899,7 @@ impl DurableBuffer {
                                         Some(SignalType::Logs) => tl += entry.item_count,
                                         Some(SignalType::Metrics) => tm += entry.item_count,
                                         Some(SignalType::Traces) => ts += entry.item_count,
+                                        Some(SignalType::Profiles) => tp += entry.item_count,
                                         None => {}
                                     }
                                     (entry.item_count, sig)
@@ -873,6 +911,7 @@ impl DurableBuffer {
                                 total_logs: tl,
                                 total_metrics: tm,
                                 total_spans: ts,
+                                total_profiles: tp,
                             }
                         }
                         Err(e) => {
@@ -900,12 +939,14 @@ impl DurableBuffer {
             let mut seg_logs = 0;
             let mut seg_metrics = 0;
             let mut seg_spans = 0;
+            let mut seg_profiles = 0;
 
             // Fast path: no bundles resolved → use precomputed totals.
             if progress.resolved_count() == 0 {
                 seg_logs = summary.total_logs;
                 seg_metrics = summary.total_metrics;
                 seg_spans = summary.total_spans;
+                seg_profiles = summary.total_profiles;
             } else {
                 // Slow path: iterate per-bundle, skipping resolved.
                 for (idx, &(item_count, signal)) in summary.bundles.iter().enumerate() {
@@ -924,6 +965,7 @@ impl DurableBuffer {
                             Some(SignalType::Logs) => seg_logs += item_count,
                             Some(SignalType::Metrics) => seg_metrics += item_count,
                             Some(SignalType::Traces) => seg_spans += item_count,
+                            Some(SignalType::Profiles) => seg_profiles += item_count,
                             None => {}
                         }
                     }
@@ -933,6 +975,7 @@ impl DurableBuffer {
             logs += seg_logs;
             metrics += seg_metrics;
             spans += seg_spans;
+            profiles += seg_profiles;
         }
 
         // Step 3: add items from the open (accumulating) segment.
@@ -952,6 +995,7 @@ impl DurableBuffer {
                 Some(SignalType::Logs) => logs += bundle.item_count,
                 Some(SignalType::Metrics) => metrics += bundle.item_count,
                 Some(SignalType::Traces) => spans += bundle.item_count,
+                Some(SignalType::Profiles) => profiles += bundle.item_count,
                 None => {}
             }
         }
@@ -985,13 +1029,14 @@ impl DurableBuffer {
 
         // Update dropped and expired metrics by draining the engine's pending bundles
         // and aggregating by signal type via signal_type_from_slot_id(). This handles all
-        // slot ranges (Arrow 10-45 and OTLP 60-62) without hardcoding any slot IDs here.
+        // slot ranges (Arrow 10-58 and OTLP 60-63) without hardcoding any slot IDs here.
         for (slot_ids, count) in engine.drain_dropped_bundles_pending() {
             let sig = slot_ids.iter().copied().find_map(signal_type_from_slot_id);
             match sig {
                 Some(SignalType::Logs) => self.metrics.dropped_log_records.add(count),
                 Some(SignalType::Metrics) => self.metrics.dropped_metric_datapoints.add(count),
                 Some(SignalType::Traces) => self.metrics.dropped_spans.add(count),
+                Some(SignalType::Profiles) => self.metrics.dropped_profile_samples.add(count),
                 None => {}
             }
         }
@@ -1002,6 +1047,7 @@ impl DurableBuffer {
                 Some(SignalType::Logs) => self.metrics.expired_log_records.add(count),
                 Some(SignalType::Metrics) => self.metrics.expired_metric_datapoints.add(count),
                 Some(SignalType::Traces) => self.metrics.expired_spans.add(count),
+                Some(SignalType::Profiles) => self.metrics.expired_profile_samples.add(count),
                 None => {}
             }
         }
@@ -1013,6 +1059,7 @@ impl DurableBuffer {
         self.metrics.queued_log_records.set(logs);
         self.metrics.queued_metric_points.set(metrics);
         self.metrics.queued_spans.set(spans);
+        self.metrics.queued_profile_samples.set(profiles);
     }
 
     /// Initialize the Quiver engine and subscriber.
@@ -1249,6 +1296,7 @@ impl DurableBuffer {
                     SignalType::Logs => self.metrics.consumed_log_records.add(item_count),
                     SignalType::Metrics => self.metrics.consumed_metric_points.add(item_count),
                     SignalType::Traces => self.metrics.consumed_spans.add(item_count),
+                    SignalType::Profiles => self.metrics.consumed_profile_samples.add(item_count),
                 }
 
                 // ACK upstream after successful durable write.
@@ -1511,6 +1559,9 @@ impl DurableBuffer {
                                 self.metrics.produced_metric_points.add(item_count)
                             }
                             SignalType::Traces => self.metrics.produced_spans.add(item_count),
+                            SignalType::Profiles => {
+                                self.metrics.produced_profile_samples.add(item_count)
+                            }
                         }
 
                         otel_debug!(
@@ -1651,6 +1702,10 @@ impl DurableBuffer {
                         self.metrics.rejected_metric_points.add(pending.item_count)
                     }
                     SignalType::Traces => self.metrics.rejected_spans.add(pending.item_count),
+                    SignalType::Profiles => self
+                        .metrics
+                        .rejected_profile_samples
+                        .add(pending.item_count),
                 }
                 self.metrics.bundles_nacked_permanent.add(1);
 
@@ -1674,6 +1729,10 @@ impl DurableBuffer {
                 SignalType::Logs => self.metrics.requeued_log_records.add(pending.item_count),
                 SignalType::Metrics => self.metrics.requeued_metric_points.add(pending.item_count),
                 SignalType::Traces => self.metrics.requeued_spans.add(pending.item_count),
+                SignalType::Profiles => self
+                    .metrics
+                    .requeued_profile_samples
+                    .add(pending.item_count),
             }
             self.metrics.bundles_nacked_deferred.add(1);
 
@@ -2160,7 +2219,9 @@ mod tests {
     const IDX_QUEUED_LOG_RECORDS: usize = 27;
     const IDX_QUEUED_METRIC_POINTS: usize = 28;
     const IDX_QUEUED_SPANS: usize = 29;
-    const EXPECTED_METRIC_COUNT: usize = 38;
+    // 7 profiles metrics (rejected/consumed/produced/requeued/queued/dropped/expired
+    // profile_samples) were appended after Stage 0b profiles signal registration.
+    const EXPECTED_METRIC_COUNT: usize = 45;
 
     #[test]
     fn test_bundle_ref_encoding_roundtrip() {
@@ -2902,6 +2963,7 @@ mod tests {
                     total_logs: 0,
                     total_metrics: 0,
                     total_spans: 0,
+                    total_profiles: 0,
                 },
                 last_seen_generation: 1,
             },
@@ -2914,6 +2976,7 @@ mod tests {
                     total_logs: 0,
                     total_metrics: 0,
                     total_spans: 0,
+                    total_profiles: 0,
                 },
                 last_seen_generation: 2,
             },
@@ -2926,6 +2989,7 @@ mod tests {
                     total_logs: 0,
                     total_metrics: 0,
                     total_spans: 0,
+                    total_profiles: 0,
                 },
                 last_seen_generation: 3,
             },

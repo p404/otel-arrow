@@ -396,6 +396,11 @@ impl TrafficGeneratorReceiver {
                             self.metrics.logs_bytes_produced.add(bytes as u64);
                         }
                     }
+                    // Unreachable: profile generation is not implemented
+                    // (`SignalGenerator` has no `generate_profiles`), so
+                    // `GenerateError::Configuration` is always returned
+                    // before a profiles `OtapPdata` could reach here.
+                    otap_df_config::SignalType::Profiles => unreachable!(),
                 };
                 Ok(Ok(count))
             }
@@ -673,6 +678,9 @@ mod tests {
             OtlpProtoBytes::ExportTracesRequest(bytes) => OtlpProtoMessage::Traces(
                 TracesData::decode(bytes.as_ref()).expect("can decode bytes"),
             ),
+            OtlpProtoBytes::ExportProfilesRequest(_) => {
+                unreachable!("traffic generator does not produce profiles")
+            }
         }
     }
 

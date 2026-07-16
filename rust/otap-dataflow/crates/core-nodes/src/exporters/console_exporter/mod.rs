@@ -126,6 +126,7 @@ impl ConsoleExporter {
             SignalType::Logs => self.export_logs(payload).await,
             SignalType::Traces => self.export_traces(payload).await,
             SignalType::Metrics => self.export_metrics(payload).await,
+            SignalType::Profiles => self.export_profiles(payload).await,
         }
     }
 
@@ -163,6 +164,14 @@ impl ConsoleExporter {
         otel_error!(
             "console.metrics.not_implemented",
             message = "Metrics formatting not yet implemented"
+        );
+    }
+
+    async fn export_profiles(&self, _payload: &OtapPayload) {
+        // TODO: Implement profiles formatting.
+        otel_error!(
+            "console.profiles.not_implemented",
+            message = "Profiles formatting not yet implemented"
         );
     }
 }

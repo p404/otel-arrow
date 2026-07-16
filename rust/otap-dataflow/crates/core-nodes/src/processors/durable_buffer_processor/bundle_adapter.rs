@@ -54,7 +54,7 @@ use quiver::segment::ReconstructedBundle;
 
 use otap_df_config::SignalType;
 use otap_df_pdata::otap::schema::SchemaIdBuilder;
-use otap_df_pdata::otap::{Logs, Metrics, OtapArrowRecords, OtapBatchStore, Traces};
+use otap_df_pdata::otap::{Logs, Metrics, OtapArrowRecords, OtapBatchStore, Profiles, Traces};
 use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use otap_df_pdata::{OtapPayload, OtapPayloadHelpers, OtlpProtoBytes};
 
@@ -70,6 +70,7 @@ mod otlp_slots {
     pub const OTLP_LOGS: u16 = 60;
     pub const OTLP_TRACES: u16 = 61;
     pub const OTLP_METRICS: u16 = 62;
+    pub const OTLP_PROFILES: u16 = 63;
 }
 
 /// Convert payload type to a slot ID (direct mapping).
@@ -87,6 +88,7 @@ pub(crate) const fn to_otlp_slot_id(signal_type: SignalType) -> SlotId {
         SignalType::Logs => otlp_slots::OTLP_LOGS,
         SignalType::Traces => otlp_slots::OTLP_TRACES,
         SignalType::Metrics => otlp_slots::OTLP_METRICS,
+        SignalType::Profiles => otlp_slots::OTLP_PROFILES,
     })
 }
 
@@ -96,6 +98,7 @@ const fn is_otlp_slot(slot: SlotId) -> Option<SignalType> {
         otlp_slots::OTLP_LOGS => Some(SignalType::Logs),
         otlp_slots::OTLP_TRACES => Some(SignalType::Traces),
         otlp_slots::OTLP_METRICS => Some(SignalType::Metrics),
+        otlp_slots::OTLP_PROFILES => Some(SignalType::Profiles),
         _ => None,
     }
 }
@@ -160,6 +163,7 @@ fn from_slot_id(slot: SlotId) -> Option<(SignalType, ArrowPayloadType)> {
         10..=26 => SignalType::Metrics, // UNIVARIATE_METRICS (10) through METRIC_ATTRS (26)
         30..=31 => SignalType::Logs,    // LOGS (30), LOG_ATTRS (31)
         40..=45 => SignalType::Traces,  // SPANS (40) through SPAN_LINK_ATTRS (45)
+        50..=58 => SignalType::Profiles, // PROFILES (50) through ATTRIBUTE_UNITS (58)
         1..=2 => return None,           // Shared slots - cannot determine signal type
         _ => return None,               // Unknown slots
     };
@@ -173,6 +177,7 @@ fn slot_label(signal_type: SignalType, payload_type: ArrowPayloadType) -> Cow<'s
         SignalType::Logs => "Log",
         SignalType::Traces => "Trace",
         SignalType::Metrics => "Metric",
+        SignalType::Profiles => "Profile",
     };
     Cow::Owned(format!("{}:{}", signal_prefix, payload_type.as_str_name()))
 }
@@ -183,6 +188,7 @@ const fn otlp_slot_label(signal_type: SignalType) -> Cow<'static, str> {
         SignalType::Logs => "OtlpLogs",
         SignalType::Traces => "OtlpTraces",
         SignalType::Metrics => "OtlpMetrics",
+        SignalType::Profiles => "OtlpProfiles",
     })
 }
 
@@ -239,6 +245,7 @@ impl OtapRecordBundleAdapter {
             OtapArrowRecords::Logs(_) => SignalType::Logs,
             OtapArrowRecords::Traces(_) => SignalType::Traces,
             OtapArrowRecords::Metrics(_) => SignalType::Metrics,
+            OtapArrowRecords::Profiles(_) => SignalType::Profiles,
         };
         let descriptor = Self::build_descriptor(&records, signal_type);
         Self {
@@ -347,6 +354,7 @@ impl OtlpBytesAdapter {
             OtlpProtoBytes::ExportLogsRequest(_) => SignalType::Logs,
             OtlpProtoBytes::ExportMetricsRequest(_) => SignalType::Metrics,
             OtlpProtoBytes::ExportTracesRequest(_) => SignalType::Traces,
+            OtlpProtoBytes::ExportProfilesRequest(_) => SignalType::Profiles,
         };
 
         // Create a record batch with a single binary column containing the OTLP bytes.
@@ -542,6 +550,7 @@ pub fn convert_bundle_to_pdata(
         SignalType::Logs => create_records::<Logs>(payloads)?,
         SignalType::Traces => create_records::<Traces>(payloads)?,
         SignalType::Metrics => create_records::<Metrics>(payloads)?,
+        SignalType::Profiles => create_records::<Profiles>(payloads)?,
     };
 
     // Wrap in OtapPayload and OtapPdata
@@ -1085,20 +1094,16 @@ mod tests {
         }
 
         // The profiles payload types (PROFILES=50 through ATTRIBUTE_UNITS=58)
-        // are registered in pdata but not yet routable as a signal (no
-        // `SignalType::Profiles`), so their slots decode to a payload type but
-        // not to a signal. Stage 0b (profiles signal registration) must update
-        // this expectation.
+        // are registered in pdata and now routable as a signal via
+        // `SignalType::Profiles` (Stage 0b: profiles signal registration).
         for raw in 50..=58 {
             let slot = SlotId::new(raw);
-            assert!(
-                slot_to_payload_type(slot).is_some(),
-                "slot {} should decode to a profiles payload type",
-                raw
-            );
-            assert!(
-                from_slot_id(slot).is_none(),
-                "slot {} should not yet map to a signal type",
+            let payload_type = slot_to_payload_type(slot)
+                .unwrap_or_else(|| panic!("slot {} should decode to a profiles payload type", raw));
+            assert_eq!(
+                from_slot_id(slot),
+                Some((SignalType::Profiles, payload_type)),
+                "slot {} should map to SignalType::Profiles",
                 raw
             );
         }

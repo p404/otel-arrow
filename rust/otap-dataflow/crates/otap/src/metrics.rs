@@ -51,6 +51,18 @@ pub struct ExporterPDataMetrics {
     /// Number of pdata traces that failed to be exported.
     #[metric(unit = "{msg}")]
     pub traces_failed: Counter<u64>,
+
+    /// Number of pdata profiles consumed by this exporter.
+    #[metric(unit = "{msg}")]
+    pub profiles_consumed: Counter<u64>,
+
+    /// Number of pdata profiles successfully exported.
+    #[metric(unit = "{msg}")]
+    pub profiles_exported: Counter<u64>,
+
+    /// Number of pdata profiles that failed to be exported.
+    #[metric(unit = "{msg}")]
+    pub profiles_failed: Counter<u64>,
 }
 
 impl ExporterPDataMetrics {
@@ -78,6 +90,7 @@ impl ExporterPDataMetrics {
             SignalType::Metrics => self.metrics_consumed.add(count),
             SignalType::Logs => self.logs_consumed.add(count),
             SignalType::Traces => self.traces_consumed.add(count),
+            SignalType::Profiles => self.profiles_consumed.add(count),
         }
     }
 
@@ -90,6 +103,7 @@ impl ExporterPDataMetrics {
             SignalType::Metrics => self.metrics_exported.add(count),
             SignalType::Logs => self.logs_exported.add(count),
             SignalType::Traces => self.traces_exported.add(count),
+            SignalType::Profiles => self.profiles_exported.add(count),
         }
     }
 
@@ -102,6 +116,7 @@ impl ExporterPDataMetrics {
             SignalType::Metrics => self.metrics_failed.add(count),
             SignalType::Logs => self.logs_failed.add(count),
             SignalType::Traces => self.traces_failed.add(count),
+            SignalType::Profiles => self.profiles_failed.add(count),
         }
     }
 }

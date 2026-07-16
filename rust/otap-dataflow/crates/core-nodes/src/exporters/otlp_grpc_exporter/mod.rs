@@ -384,6 +384,23 @@ impl Exporter<OtapPdata> for OTLPExporter {
                             )
                             .await;
                         }
+                        (SignalType::Profiles, OtapPayload::OtapArrowRecords(otap_batch)) => {
+                            // No `ProfilesProtoBytesEncoder` exists yet (OTAP
+                            // profiles -> OTLP proto encode is not implemented),
+                            // so this batch cannot be converted to an OTLP
+                            // export request. Nack it clearly rather than
+                            // silently dropping it or panicking.
+                            self.pdata_metrics.inc_failed(SignalType::Profiles);
+                            effect_handler
+                                .notify_nack(NackMsg::new_permanent(
+                                    "profiles OTAP -> OTLP proto encoding is not yet implemented",
+                                    OtapPdata::new(
+                                        context,
+                                        OtapPayload::OtapArrowRecords(otap_batch),
+                                    ),
+                                ))
+                                .await?;
+                        }
                         (_, OtapPayload::OtlpBytes(service_req)) => {
                             let prepared = match service_req {
                                 OtlpProtoBytes::ExportLogsRequest(bytes) => prepare_otlp_export(
@@ -407,6 +424,25 @@ impl Exporter<OtapPdata> for OTLPExporter {
                                     SignalType::Traces,
                                     |b| OtlpProtoBytes::ExportTracesRequest(b).into(),
                                 ),
+                                OtlpProtoBytes::ExportProfilesRequest(bytes) => {
+                                    // No `SignalClient::Profiles` / gRPC client
+                                    // pool exists yet for the profiles signal,
+                                    // so there is nowhere to route an already-
+                                    // encoded OTLP profiles export. Nack it
+                                    // clearly rather than silently dropping it
+                                    // or panicking on the client lookup below.
+                                    effect_handler
+                                        .notify_nack(NackMsg::new_permanent(
+                                            "profiles are not yet supported by the OTLP gRPC exporter",
+                                            OtapPdata::new(
+                                                context,
+                                                OtlpProtoBytes::ExportProfilesRequest(bytes)
+                                                    .into(),
+                                            ),
+                                        ))
+                                        .await?;
+                                    continue;
+                                }
                             };
 
                             let client = match signal_type {
@@ -416,6 +452,13 @@ impl Exporter<OtapPdata> for OTLPExporter {
                                 }
                                 SignalType::Traces => {
                                     SignalClient::Traces(grpc_clients.take_traces())
+                                }
+                                // Unreachable: the `ExportProfilesRequest` arm
+                                // above always `continue`s before reaching
+                                // this point, since there is no
+                                // `SignalClient::Profiles`.
+                                SignalType::Profiles => {
+                                    unreachable!("profiles OTLP export is nacked above")
                                 }
                             };
                             let future = make_export_future(prepared, client);

@@ -683,6 +683,34 @@ pub(crate) fn payload_relations(parent_type: ArrowPayloadType) -> PayloadRelatio
                 size: IdColumnType::U32,
             }],
         },
+
+        // Profiles. Sample is the only parent-id joined child of the root;
+        // the interned lookup tables (Mapping/Location/Function/Link/String/
+        // AttributeTable/AttributeUnits) are referenced by row index and so
+        // have no relation in this join-based sense.
+        ArrowPayloadType::Profiles => PayloadRelationInfo {
+            primary_id: Some(PrimaryIdInfo {
+                name: ID,
+                size: IdColumnType::U16,
+            }),
+            relations: &[
+                Relation {
+                    key_col: RESOURCE_ID_COL_PATH,
+                    child_types: &[ArrowPayloadType::ResourceAttrs],
+                    size: IdColumnType::U16,
+                },
+                Relation {
+                    key_col: SCOPE_ID_COL_PATH,
+                    child_types: &[ArrowPayloadType::ScopeAttrs],
+                    size: IdColumnType::U16,
+                },
+                Relation {
+                    key_col: ID,
+                    child_types: &[ArrowPayloadType::Sample],
+                    size: IdColumnType::U16,
+                },
+            ],
+        },
         _ => PayloadRelationInfo {
             primary_id: None,
             relations: &[],

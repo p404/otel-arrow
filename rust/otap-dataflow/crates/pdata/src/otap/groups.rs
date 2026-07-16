@@ -6,7 +6,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use crate::{
     otap::{
-        Logs, Metrics, OtapArrowRecords, OtapBatchStore, Traces,
+        Logs, Metrics, OtapArrowRecords, OtapBatchStore, Profiles, Traces,
         error::{Error, Result},
         num_items, raw_batch_store,
         raw_batch_store::POSITION_LOOKUP,
@@ -33,15 +33,17 @@ pub(crate) enum RecordsGroup {
     Metrics(Vec<[Option<RecordBatch>; Metrics::COUNT]>),
     /// OTAP traces
     Traces(Vec<[Option<RecordBatch>; Traces::COUNT]>),
+    /// OTAP profiles
+    Profiles(Vec<[Option<RecordBatch>; Profiles::COUNT]>),
 }
 
 impl RecordsGroup {
-    /// Convert a sequence of `OtapArrowRecords` into three `RecordsGroup` objects.
+    /// Convert a sequence of `OtapArrowRecords` into four `RecordsGroup` objects.
     /// This is a sanity check. In practice, we expect the higher-level batching
     /// component to separate data by signal type. The public APIs for separating
     /// by expected signal type enforce this.
     #[must_use]
-    fn separate_by_type(records: Vec<OtapArrowRecords>) -> [Self; 3] {
+    fn separate_by_type(records: Vec<OtapArrowRecords>) -> [Self; 4] {
         let log_count = signal_count(&records, SignalType::Logs);
         let mut log_records = Vec::with_capacity(log_count);
 
@@ -50,6 +52,9 @@ impl RecordsGroup {
 
         let trace_count = signal_count(&records, SignalType::Traces);
         let mut trace_records = Vec::with_capacity(trace_count);
+
+        let profile_count = signal_count(&records, SignalType::Profiles);
+        let mut profile_records = Vec::with_capacity(profile_count);
 
         for records in records {
             match records {
@@ -80,6 +85,15 @@ impl RecordsGroup {
                         trace_records.push(batches);
                     }
                 }
+                OtapArrowRecords::Profiles(profiles) => {
+                    let batches = profiles.into_batches();
+                    if primary_table(&batches)
+                        .map(|batch| batch.num_rows() > 0)
+                        .unwrap_or(false)
+                    {
+                        profile_records.push(batches);
+                    }
+                }
             }
         }
 
@@ -87,13 +101,14 @@ impl RecordsGroup {
             RecordsGroup::Logs(log_records),
             RecordsGroup::Metrics(metric_records),
             RecordsGroup::Traces(trace_records),
+            RecordsGroup::Profiles(profile_records),
         ]
     }
 
     /// Separate, expecting only logs.
     pub(crate) fn separate_logs(records: Vec<OtapArrowRecords>) -> Result<Self> {
-        let [logs, metrics, traces] = RecordsGroup::separate_by_type(records);
-        if !metrics.is_empty() || !traces.is_empty() {
+        let [logs, metrics, traces, profiles] = RecordsGroup::separate_by_type(records);
+        if !metrics.is_empty() || !traces.is_empty() || !profiles.is_empty() {
             Err(Error::MixedSignals)
         } else {
             Ok(logs)
@@ -102,8 +117,8 @@ impl RecordsGroup {
 
     /// Separate, expecting only metrics.
     pub(crate) fn separate_metrics(records: Vec<OtapArrowRecords>) -> Result<Self> {
-        let [logs, metrics, traces] = RecordsGroup::separate_by_type(records);
-        if !logs.is_empty() || !traces.is_empty() {
+        let [logs, metrics, traces, profiles] = RecordsGroup::separate_by_type(records);
+        if !logs.is_empty() || !traces.is_empty() || !profiles.is_empty() {
             Err(Error::MixedSignals)
         } else {
             Ok(metrics)
@@ -112,11 +127,21 @@ impl RecordsGroup {
 
     /// Separate, expecting only traces.
     pub(crate) fn separate_traces(records: Vec<OtapArrowRecords>) -> Result<Self> {
-        let [logs, metrics, traces] = RecordsGroup::separate_by_type(records);
-        if !logs.is_empty() || !metrics.is_empty() {
+        let [logs, metrics, traces, profiles] = RecordsGroup::separate_by_type(records);
+        if !logs.is_empty() || !metrics.is_empty() || !profiles.is_empty() {
             Err(Error::MixedSignals)
         } else {
             Ok(traces)
+        }
+    }
+
+    /// Separate, expecting only profiles.
+    pub(crate) fn separate_profiles(records: Vec<OtapArrowRecords>) -> Result<Self> {
+        let [logs, metrics, traces, profiles] = RecordsGroup::separate_by_type(records);
+        if !logs.is_empty() || !metrics.is_empty() || !traces.is_empty() {
+            Err(Error::MixedSignals)
+        } else {
+            Ok(profiles)
         }
     }
 
@@ -135,6 +160,15 @@ impl RecordsGroup {
             RecordsGroup::Traces(mut items) => {
                 RecordsGroup::Traces(split::split::<{ Traces::COUNT }>(&mut items, max_items)?)
             }
+            RecordsGroup::Profiles(_) => {
+                // Splitting profiles requires join-based planning against the
+                // Sample table (analogous to metrics' data-point join), which
+                // is not yet implemented. Fail clearly rather than guess at
+                // split boundaries.
+                return Err(Error::ProfilesNotImplemented {
+                    feature: "batching (split)",
+                });
+            }
         })
     }
 
@@ -150,6 +184,19 @@ impl RecordsGroup {
             }
             RecordsGroup::Traces(items) => {
                 RecordsGroup::Traces(generic_concatenate(items, max_items)?)
+            }
+            RecordsGroup::Profiles(_) => {
+                // The generic machinery stacks every payload slot row-wise,
+                // but the profiles interned tables (string/function/location/
+                // mapping/link/attribute) are referenced by ABSOLUTE ROW INDEX
+                // from profile/sample/location/mapping rows: merging two
+                // batches shifts the second batch's table rows without
+                // rewriting its index references, silently corrupting them.
+                // A profiles concatenate must merge (or dedup) the interned
+                // tables and rebase every index column — not yet implemented.
+                return Err(Error::ProfilesNotImplemented {
+                    feature: "batching (concatenate)",
+                });
             }
         })
     }
@@ -179,6 +226,13 @@ impl RecordsGroup {
                     Traces::try_from(raw).map(OtapArrowRecords::Traces)
                 })
                 .collect(),
+            RecordsGroup::Profiles(items) => items
+                .into_iter()
+                .map(|batches| {
+                    let raw = raw_batch_store::RawProfilesStore::from_batches(batches);
+                    Profiles::try_from(raw).map(OtapArrowRecords::Profiles)
+                })
+                .collect(),
         }
     }
 
@@ -189,6 +243,7 @@ impl RecordsGroup {
             Self::Logs(logs) => logs.is_empty(),
             Self::Metrics(metrics) => metrics.is_empty(),
             Self::Traces(traces) => traces.is_empty(),
+            Self::Profiles(profiles) => profiles.is_empty(),
         }
     }
 }
@@ -211,15 +266,13 @@ fn signal_count(records: &[OtapArrowRecords], signal: SignalType) -> usize {
 /// Fetch the primary table for a given batch.
 #[must_use]
 fn primary_table<const N: usize>(batches: &[Option<RecordBatch>; N]) -> Option<&RecordBatch> {
-    // TODO(profiles): add a Profiles::COUNT arm (primary table = Profiles)
-    // when `OtapArrowRecords::Profiles` is wired up, or an 11-slot store will
-    // hit the unreachable fallback at runtime.
     match N {
         Logs::COUNT => batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].as_ref(),
         Metrics::COUNT => {
             batches[POSITION_LOOKUP[ArrowPayloadType::UnivariateMetrics as usize]].as_ref()
         }
         Traces::COUNT => batches[POSITION_LOOKUP[ArrowPayloadType::Spans as usize]].as_ref(),
+        Profiles::COUNT => batches[POSITION_LOOKUP[ArrowPayloadType::Profiles as usize]].as_ref(),
         _ => {
             unreachable!()
         }

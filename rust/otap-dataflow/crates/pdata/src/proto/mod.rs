@@ -290,6 +290,19 @@ impl TryFrom<crate::otlp::OtlpProtoBytes> for OtlpProtoMessage {
             OtlpProtoBytes::ExportMetricsRequest(b) => {
                 OtlpProtoMessage::Metrics(MetricsData::decode(b.as_ref())?)
             }
+            OtlpProtoBytes::ExportProfilesRequest(_) => {
+                // `OtlpProtoMessage` has no `Profiles` variant yet: OTLP<->OTAP
+                // profiles conversion is deferred (see
+                // `crate::error::Error::ProfilesNotImplemented`). `DecodeError::new`
+                // is deprecated upstream but remains the only public constructor
+                // for a generic decode error; used deliberately so callers (e.g.
+                // `validation_exporter`, which does `.ok()`) get a typed error
+                // instead of a silent drop or a panic.
+                #[allow(deprecated)]
+                return Err(prost::DecodeError::new(
+                    "profiles OTLP proto conversion is not yet implemented",
+                ));
+            }
         })
     }
 }

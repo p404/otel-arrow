@@ -325,48 +325,62 @@ impl AttributesProcessor {
             && self.transform.hash.is_none()
     }
 
+    /// Returns the payload types that the currently configured domains apply
+    /// to for `signal`, or `None` when the combination is not supported.
+    ///
+    /// The "signal" domain has no defined meaning for profiles yet: unlike
+    /// `LogAttrs`/`MetricAttrs`/`SpanAttrs` (owned, parent-id-joined per
+    /// signal item), profiles attributes live in a single interned
+    /// `AttributeTable` shared across `Sample`/`Mapping`/`Location` rows, so
+    /// there is no dedicated "profiles signal attrs" payload type to target.
     #[inline]
-    const fn attrs_payloads(&self, signal: SignalType) -> &'static [ArrowPayloadType] {
+    const fn attrs_payloads(&self, signal: SignalType) -> Option<&'static [ArrowPayloadType]> {
         use payload_sets::*;
 
-        match (
-            self.has_resource_domain,
-            self.has_scope_domain,
-            self.has_signal_domain,
-            signal,
-        ) {
-            // Empty cases
-            (false, false, false, _) => EMPTY,
+        Some(
+            match (
+                self.has_resource_domain,
+                self.has_scope_domain,
+                self.has_signal_domain,
+                signal,
+            ) {
+                // Empty cases
+                (false, false, false, _) => EMPTY,
 
-            // Signal only
-            (false, false, true, SignalType::Logs) => LOGS_SIGNAL,
-            (false, false, true, SignalType::Metrics) => METRICS_SIGNAL,
-            (false, false, true, SignalType::Traces) => TRACES_SIGNAL,
+                // Signal only
+                (false, false, true, SignalType::Logs) => LOGS_SIGNAL,
+                (false, false, true, SignalType::Metrics) => METRICS_SIGNAL,
+                (false, false, true, SignalType::Traces) => TRACES_SIGNAL,
+                (false, false, true, SignalType::Profiles) => return None,
 
-            // Resource only
-            (true, false, false, _) => RESOURCE_ONLY,
+                // Resource only
+                (true, false, false, _) => RESOURCE_ONLY,
 
-            // Scope only
-            (false, true, false, _) => SCOPE_ONLY,
+                // Scope only
+                (false, true, false, _) => SCOPE_ONLY,
 
-            // Resource + Signal
-            (true, false, true, SignalType::Logs) => LOGS_RESOURCE_SIGNAL,
-            (true, false, true, SignalType::Metrics) => METRICS_RESOURCE_SIGNAL,
-            (true, false, true, SignalType::Traces) => TRACES_RESOURCE_SIGNAL,
+                // Resource + Signal
+                (true, false, true, SignalType::Logs) => LOGS_RESOURCE_SIGNAL,
+                (true, false, true, SignalType::Metrics) => METRICS_RESOURCE_SIGNAL,
+                (true, false, true, SignalType::Traces) => TRACES_RESOURCE_SIGNAL,
+                (true, false, true, SignalType::Profiles) => return None,
 
-            // Scope + Signal
-            (false, true, true, SignalType::Logs) => LOGS_SCOPE_SIGNAL,
-            (false, true, true, SignalType::Metrics) => METRICS_SCOPE_SIGNAL,
-            (false, true, true, SignalType::Traces) => TRACES_SCOPE_SIGNAL,
+                // Scope + Signal
+                (false, true, true, SignalType::Logs) => LOGS_SCOPE_SIGNAL,
+                (false, true, true, SignalType::Metrics) => METRICS_SCOPE_SIGNAL,
+                (false, true, true, SignalType::Traces) => TRACES_SCOPE_SIGNAL,
+                (false, true, true, SignalType::Profiles) => return None,
 
-            // Resource + Scope (no signal)
-            (true, true, false, _) => RESOURCE_SCOPE,
+                // Resource + Scope (no signal)
+                (true, true, false, _) => RESOURCE_SCOPE,
 
-            // All three
-            (true, true, true, SignalType::Logs) => LOGS_ALL,
-            (true, true, true, SignalType::Metrics) => METRICS_ALL,
-            (true, true, true, SignalType::Traces) => TRACES_ALL,
-        }
+                // All three
+                (true, true, true, SignalType::Logs) => LOGS_ALL,
+                (true, true, true, SignalType::Metrics) => METRICS_ALL,
+                (true, true, true, SignalType::Traces) => TRACES_ALL,
+                (true, true, true, SignalType::Profiles) => return None,
+            },
+        )
     }
 
     #[allow(clippy::result_large_err)]
@@ -374,6 +388,7 @@ impl AttributesProcessor {
         &self,
         records: &mut OtapArrowRecords,
         signal: SignalType,
+        processor_id: NodeId,
     ) -> Result<(u64, u64, u64, u64, u64, u64), EngineError> {
         let mut deleted_total: u64 = 0;
         let mut renamed_total: u64 = 0;
@@ -383,7 +398,16 @@ impl AttributesProcessor {
         let mut hashed_total: u64 = 0;
 
         if !self.is_noop() {
-            let payloads = self.attrs_payloads(signal);
+            let payloads = self.attrs_payloads(signal).ok_or_else(|| {
+                EngineError::ProcessorError {
+                    processor: processor_id,
+                    kind: otap_df_engine::error::ProcessorErrorKind::Configuration,
+                    error: format!(
+                        "attribute transforms with domain 'signal' are not yet supported for the {signal:?} signal"
+                    ),
+                    source_detail: String::new(),
+                }
+            })?;
             for &payload_ty in payloads {
                 let stats = apply_attribute_transform(records, payload_ty, &self.transform, true)?
                     .unwrap_or_default();
@@ -452,8 +476,9 @@ impl local::Processor<OtapPdata> for AttributesProcessor {
                     self.metrics.domains_signal.inc();
                 }
                 // Apply transform across selected domains and collect exact stats.
+                let processor_id = effect_handler.processor_id();
                 let result = effect_handler.timed(&self.compute_duration, || {
-                    self.apply_transform_with_stats(&mut records, signal)
+                    self.apply_transform_with_stats(&mut records, signal, processor_id)
                 });
                 match result {
                     Ok((

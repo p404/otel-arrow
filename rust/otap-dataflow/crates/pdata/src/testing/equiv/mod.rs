@@ -74,6 +74,9 @@ pub fn assert_equivalent(left: &[OtlpProtoMessage], right: &[OtlpProtoMessage]) 
             &left.iter().map(otap_to_otlp_traces).collect::<Vec<_>>(),
             &right.iter().map(otap_to_otlp_traces).collect::<Vec<_>>(),
         ),
+        // `OtlpProtoMessage` has no `Profiles` variant, so `signal_type()`
+        // (derived from it, above) can never actually be `Profiles` here.
+        SignalType::Profiles => unreachable!("OtlpProtoMessage has no Profiles variant"),
     }
 }
 
@@ -101,5 +104,8 @@ pub fn validate_equivalent(left: &[OtlpProtoMessage], right: &[OtlpProtoMessage]
             &left.iter().map(otap_to_otlp_traces).collect::<Vec<_>>(),
             &right.iter().map(otap_to_otlp_traces).collect::<Vec<_>>(),
         ),
+        // `OtlpProtoMessage` has no `Profiles` variant, so `signal_type()`
+        // (derived from it, above) can never actually be `Profiles` here.
+        SignalType::Profiles => unreachable!("OtlpProtoMessage has no Profiles variant"),
     }
 }

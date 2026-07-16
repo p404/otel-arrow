@@ -34,6 +34,7 @@ use otap_df_engine::{
 use otap_df_pdata::OtlpProtoBytes;
 use otap_df_pdata::proto::opentelemetry::collector::logs::v1::ExportLogsServiceResponse;
 use otap_df_pdata::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceResponse;
+use otap_df_pdata::proto::opentelemetry::collector::profiles::v1development::ExportProfilesServiceResponse;
 use otap_df_pdata::proto::opentelemetry::collector::trace::v1::ExportTraceServiceResponse;
 use otap_df_telemetry::metrics::MetricSet;
 use parking_lot::Mutex;
@@ -225,6 +226,7 @@ fn response_bytes(signal: SignalType) -> Bytes {
     static LOGS: OnceLock<Bytes> = OnceLock::new();
     static METRICS: OnceLock<Bytes> = OnceLock::new();
     static TRACES: OnceLock<Bytes> = OnceLock::new();
+    static PROFILES: OnceLock<Bytes> = OnceLock::new();
 
     match signal {
         SignalType::Logs => LOGS
@@ -235,6 +237,9 @@ fn response_bytes(signal: SignalType) -> Bytes {
             .clone(),
         SignalType::Traces => TRACES
             .get_or_init(encode::<ExportTraceServiceResponse>)
+            .clone(),
+        SignalType::Profiles => PROFILES
+            .get_or_init(encode::<ExportProfilesServiceResponse>)
             .clone(),
     }
 }
@@ -701,6 +706,7 @@ impl HttpHandler {
                 SignalType::Logs => OtlpProtoBytes::ExportLogsRequest(body),
                 SignalType::Metrics => OtlpProtoBytes::ExportMetricsRequest(body),
                 SignalType::Traces => OtlpProtoBytes::ExportTracesRequest(body),
+                SignalType::Profiles => OtlpProtoBytes::ExportProfilesRequest(body),
             };
 
             let mut pdata = OtapPdata::new(context, payload.into());
@@ -723,6 +729,9 @@ impl HttpHandler {
                     SignalType::Logs => self.ack_registry.logs.clone(),
                     SignalType::Metrics => self.ack_registry.metrics.clone(),
                     SignalType::Traces => self.ack_registry.traces.clone(),
+                    // No OTLP profiles gRPC/HTTP service is registered yet, so
+                    // there is no subscription map to route through.
+                    SignalType::Profiles => None,
                 };
 
                 let Some(state) = state else {

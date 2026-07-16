@@ -3,7 +3,7 @@
 
 use crate::decode::record_message::RecordMessage;
 use crate::error::{Error, Result};
-use crate::otap::{OtapArrowRecords, from_record_messages};
+use crate::otap::{OtapArrowRecords, Profiles, from_record_messages};
 use crate::otlp::logs::LogsProtoBytesEncoder;
 use crate::otlp::metrics::MetricsProtoBytesEncoder;
 use crate::otlp::traces::TracesProtoBytesEncoder;
@@ -11,6 +11,7 @@ use crate::otlp::{ProtoBuffer, ProtoBytesEncoder};
 use crate::proto::opentelemetry::arrow::v1::{ArrowPayload, ArrowPayloadType, BatchArrowRecords};
 use crate::proto::opentelemetry::collector::logs::v1::ExportLogsServiceRequest;
 use crate::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+use crate::proto::opentelemetry::collector::profiles::v1development::ExportProfilesServiceRequest;
 use crate::proto::opentelemetry::collector::trace::v1::ExportTraceServiceRequest;
 use arrow::array::RecordBatch;
 use arrow::error::ArrowError;
@@ -173,6 +174,29 @@ impl Consumer {
             Error::UnexpectedRecordBatchState {
                 reason: format!("error decoding proto serialization {e:?}"),
             }
+        })
+    }
+
+    /// Consumes all the arrow payloads in the passed OTAP `BatchArrayRecords` and decodes them
+    /// into a validated `Profiles` OTAP batch.
+    ///
+    /// Unlike [`Self::consume_logs_batches`]/[`Self::consume_metrics_batches`]/
+    /// [`Self::consume_traces_batches`], this does not go on to produce an
+    /// `ExportProfilesServiceRequest`: there is no `ProfilesProtoBytesEncoder`
+    /// yet (OTAP profiles -> OTLP proto encoding is not implemented, see
+    /// [`Error::ProfilesNotImplemented`]). The record batches are still fully
+    /// decoded and validated against the `Profiles` OTAP schema so callers get
+    /// a clear, typed error rather than a panic or a silently-dropped batch.
+    pub fn consume_profiles_batches(
+        &mut self,
+        records: &mut BatchArrowRecords,
+    ) -> Result<ExportProfilesServiceRequest> {
+        let record_messages = self.consume_bar(records)?;
+        let _otap_batch =
+            OtapArrowRecords::Profiles(from_record_messages::<Profiles>(record_messages)?);
+
+        Err(Error::ProfilesNotImplemented {
+            feature: "OTAP profiles -> OTLP proto encoding",
         })
     }
 }

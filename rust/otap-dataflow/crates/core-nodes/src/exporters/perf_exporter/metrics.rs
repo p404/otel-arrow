@@ -22,4 +22,7 @@ pub struct PerfExporterPdataMetrics {
     /// Number of metrics received.
     #[metric(unit = "{metric}")]
     pub metrics: Counter<u64>,
+    /// Number of profiles samples received.
+    #[metric(unit = "{sample}")]
+    pub profiles: Counter<u64>,
 }

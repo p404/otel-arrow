@@ -92,6 +92,10 @@ const fn wakeup_slot(format: SignalFormat, signal: SignalType) -> WakeupSlot {
         SignalType::Logs => 0,
         SignalType::Metrics => 1,
         SignalType::Traces => 2,
+        // Batching is not yet implemented for the profiles signal (rejected
+        // in `process_signal_impl` before a wakeup slot would ever be
+        // needed); no offset is reserved for it.
+        SignalType::Profiles => unreachable!(),
     };
     WakeupSlot(format_base + signal_offset)
 }
@@ -511,6 +515,12 @@ pub struct BatchProcessorMetrics {
     /// Total batches consumed for traces signal
     #[metric(unit = "{item}")]
     consumed_batches_traces: Counter<u64>,
+    /// Total batches consumed for the profiles signal. Profiles batching is
+    /// not yet implemented by this processor, so these are always rejected
+    /// (see `process_signal_impl`); this counter tracks how much such
+    /// traffic is being rejected.
+    #[metric(unit = "{item}")]
+    consumed_batches_profiles: Counter<u64>,
 
     /// Total batches produced for logs signal
     #[metric(unit = "{item}")]
@@ -582,6 +592,12 @@ impl BatchProcessor {
     fn no_active_format_error() -> EngineError {
         EngineError::InternalError {
             message: "batch processor has no active format state".to_owned(),
+        }
+    }
+
+    fn profiles_not_supported_error() -> EngineError {
+        EngineError::InternalError {
+            message: "batch processor does not yet support the profiles signal".to_owned(),
         }
     }
 
@@ -720,7 +736,17 @@ impl BatchProcessor {
             SignalType::Logs => self.metrics.consumed_batches_logs.add(1),
             SignalType::Metrics => self.metrics.consumed_batches_metrics.add(1),
             SignalType::Traces => self.metrics.consumed_batches_traces.add(1),
+            SignalType::Profiles => self.metrics.consumed_batches_profiles.add(1),
         };
+
+        // Profiles batching (`SignalBuffer<T>` for the profiles signal) is
+        // not wired up yet: unlike logs/metrics/traces there is no
+        // `signals.profiles` buffer to accumulate into below. Reject clearly
+        // rather than silently dropping the batch or panicking in
+        // `for_signal`.
+        if signal == SignalType::Profiles {
+            return Err(Self::profiles_not_supported_error());
+        }
 
         let (ctx, payload) = request.into_parts();
 
@@ -775,6 +801,12 @@ where
                 SignalType::Logs => &mut self.signals.logs,
                 SignalType::Traces => &mut self.signals.traces,
                 SignalType::Metrics => &mut self.signals.metrics,
+                // Batching is not yet implemented for the profiles signal;
+                // `process_signal_impl` rejects it before `for_signal` would
+                // ever be called with it.
+                SignalType::Profiles => {
+                    unreachable!()
+                }
             },
             metrics: self.metrics,
         }
@@ -799,6 +831,9 @@ impl Batcher<OtapArrowRecords> for SignalBuffer<OtapArrowRecords> {
                 OtapArrowRecords::Metrics(otap_df_pdata::otap::Metrics::default())
             }
             SignalType::Traces => OtapArrowRecords::Traces(otap_df_pdata::otap::Traces::default()),
+            SignalType::Profiles => {
+                unreachable!("profiles batching is rejected before this point")
+            }
         }
     }
 
@@ -823,6 +858,9 @@ impl Batcher<OtlpProtoBytes> for SignalBuffer<OtlpProtoBytes> {
             SignalType::Logs => OtlpProtoBytes::ExportLogsRequest(Bytes::new()),
             SignalType::Metrics => OtlpProtoBytes::ExportMetricsRequest(Bytes::new()),
             SignalType::Traces => OtlpProtoBytes::ExportTracesRequest(Bytes::new()),
+            SignalType::Profiles => {
+                unreachable!("profiles batching is rejected before this point")
+            }
         }
     }
 
@@ -1068,6 +1106,10 @@ where
                 SignalType::Logs => self.metrics.produced_batches_logs.add(1),
                 SignalType::Metrics => self.metrics.produced_batches_metrics.add(1),
                 SignalType::Traces => self.metrics.produced_batches_traces.add(1),
+                // Unreachable: `self.signal` can only be `Profiles` if
+                // `for_signal` was called with it, which never happens
+                // (`process_signal_impl` rejects profiles first).
+                SignalType::Profiles => unreachable!(),
             }
 
             // If any inputs in this batch require notification, get an

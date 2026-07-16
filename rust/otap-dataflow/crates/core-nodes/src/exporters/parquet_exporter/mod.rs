@@ -40,6 +40,7 @@ use async_trait::async_trait;
 use futures::{FutureExt, pin_mut};
 use futures_timer::Delay;
 use linkme::distributed_slice;
+use otap_df_config::SignalType;
 use otap_df_config::node::NodeUserConfig;
 use otap_df_engine::ExporterFactory;
 use otap_df_engine::config::ExporterConfig;
@@ -304,6 +305,24 @@ impl Exporter<OtapPdata> for ParquetExporter {
                 Message::PData(pdata) => {
                     // Capture signal type before moving pdata into try_from
                     let signal_type = pdata.signal_type();
+
+                    // `OtapParquetRecords` (this exporter's unvalidated batch
+                    // store) has no `Profiles` variant yet: Parquet export of
+                    // profiles is a separate follow-on feature (schema
+                    // mapping, partitioning, file naming), not part of
+                    // registering profiles as a routable OTAP signal.
+                    if signal_type == SignalType::Profiles {
+                        if let Some(metrics) = self.pdata_metrics.as_mut() {
+                            metrics.inc_failed(signal_type);
+                        }
+                        return Err(Error::ExporterError {
+                            exporter: exporter_id.clone(),
+                            kind: ExporterErrorKind::Other,
+                            error: "profiles are not yet supported by the parquet exporter"
+                                .to_string(),
+                            source_detail: String::new(),
+                        });
+                    }
 
                     // Note: context is not used
                     let (_context, payload) = pdata.into_parts();

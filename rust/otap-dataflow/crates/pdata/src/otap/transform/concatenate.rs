@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::error::Error;
-use crate::otap::{Logs, Metrics, OtapBatchStore, Result, Traces};
+use crate::otap::{Logs, Metrics, OtapBatchStore, Profiles, Result, Traces};
 use crate::schema::consts::metadata::COLUMN_ENCODING;
 use crate::schema::consts::metadata::encodings::PLAIN;
 use crate::schema::consts::{ID, PARENT_ID};
@@ -94,6 +94,12 @@ pub fn concatenate<const N: usize>(
         Logs::COUNT => concatenate_signal::<Logs, N>(items),
         Metrics::COUNT => concatenate_signal::<Metrics, N>(items),
         Traces::COUNT => concatenate_signal::<Traces, N>(items),
+        // Row-stacking the profiles interned tables without rebasing the
+        // absolute row-index references into them silently corrupts the data;
+        // profiles concatenation needs a table-merging implementation first.
+        Profiles::COUNT => Err(Error::ProfilesNotImplemented {
+            feature: "batching (concatenate)",
+        }),
         // FIXME: This is a hack for now to avoid having to rewrite a lot of
         // the tests. We can make the tests a lot better now that we have payload
         // definitions.

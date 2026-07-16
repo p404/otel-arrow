@@ -40,4 +40,8 @@ pub struct DebugPdataMetrics {
     /// number of traces (batches) consumed
     #[metric(unit = "{msg}")]
     pub traces_consumed: Counter<u64>,
+    /// number of profiles (batches) consumed. Profiles printing is not yet
+    /// implemented, so these are counted but never decoded/printed.
+    #[metric(unit = "{msg}")]
+    pub profiles_consumed: Counter<u64>,
 }

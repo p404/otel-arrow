@@ -44,6 +44,8 @@ pub enum OtapArrowRecords {
     Metrics(Metrics),
     /// Represents a batch of spans data.
     Traces(Traces),
+    /// Represents a batch of profiles data.
+    Profiles(Profiles),
 }
 
 impl OtapArrowRecords {
@@ -54,6 +56,7 @@ impl OtapArrowRecords {
             Self::Logs(logs) => logs.set(payload_type, record_batch),
             Self::Metrics(metrics) => metrics.set(payload_type, record_batch),
             Self::Traces(spans) => spans.set(payload_type, record_batch),
+            Self::Profiles(profiles) => profiles.set(payload_type, record_batch),
         }
     }
 
@@ -64,6 +67,7 @@ impl OtapArrowRecords {
             Self::Logs(logs) => logs.remove(payload_type),
             Self::Metrics(metrics) => metrics.remove(payload_type),
             Self::Traces(spans) => spans.remove(payload_type),
+            Self::Profiles(profiles) => profiles.remove(payload_type),
         }
     }
 
@@ -76,6 +80,7 @@ impl OtapArrowRecords {
             Self::Logs(logs) => logs.get(payload_type),
             Self::Metrics(metrics) => metrics.get(payload_type),
             Self::Traces(spans) => spans.get(payload_type),
+            Self::Profiles(profiles) => profiles.get(payload_type),
         }
     }
 
@@ -88,6 +93,7 @@ impl OtapArrowRecords {
             Self::Logs(_) => Logs::allowed_payload_types(),
             Self::Metrics(_) => Metrics::allowed_payload_types(),
             Self::Traces(_) => Traces::allowed_payload_types(),
+            Self::Profiles(_) => Profiles::allowed_payload_types(),
         }
     }
 
@@ -97,6 +103,7 @@ impl OtapArrowRecords {
         match self {
             Self::Logs(_) => ArrowPayloadType::Logs,
             Self::Traces(_) => ArrowPayloadType::Spans,
+            Self::Profiles(_) => ArrowPayloadType::Profiles,
             Self::Metrics(metrics) => {
                 if metrics.get(ArrowPayloadType::MultivariateMetrics).is_some() {
                     ArrowPayloadType::MultivariateMetrics
@@ -120,6 +127,7 @@ impl OtapArrowRecords {
             Self::Logs(_) => Logs::decode_transport_optimized_ids(self),
             Self::Metrics(_) => Metrics::decode_transport_optimized_ids(self),
             Self::Traces(_) => Traces::decode_transport_optimized_ids(self),
+            Self::Profiles(_) => Profiles::decode_transport_optimized_ids(self),
         }
     }
 
@@ -130,6 +138,7 @@ impl OtapArrowRecords {
             Self::Logs(logs) => logs.num_items(),
             Self::Metrics(metrics) => metrics.num_items(),
             Self::Traces(traces) => traces.num_items(),
+            Self::Profiles(profiles) => profiles.num_items(),
         }
     }
 
@@ -140,6 +149,7 @@ impl OtapArrowRecords {
             Self::Logs(_) => SignalType::Logs,
             Self::Metrics(_) => SignalType::Metrics,
             Self::Traces(_) => SignalType::Traces,
+            Self::Profiles(_) => SignalType::Profiles,
         }
     }
 
@@ -158,6 +168,7 @@ impl OtapArrowRecords {
             Self::Logs(_) => Logs::encode_transport_optimized(self),
             Self::Metrics(_) => Metrics::encode_transport_optimized(self),
             Self::Traces(_) => Traces::encode_transport_optimized(self),
+            Self::Profiles(_) => Profiles::encode_transport_optimized(self),
         }
     }
 }
@@ -180,6 +191,12 @@ impl From<Traces> for OtapArrowRecords {
     }
 }
 
+impl From<Profiles> for OtapArrowRecords {
+    fn from(profiles: Profiles) -> Self {
+        Self::Profiles(profiles)
+    }
+}
+
 impl From<Logs> for raw_batch_store::RawLogsStore {
     fn from(logs: Logs) -> Self {
         logs.inner
@@ -198,18 +215,20 @@ impl From<Traces> for raw_batch_store::RawTracesStore {
     }
 }
 
+impl From<Profiles> for raw_batch_store::RawProfilesStore {
+    fn from(profiles: Profiles) -> Self {
+        profiles.inner
+    }
+}
+
 impl TryFrom<OtapArrowRecords> for Logs {
     type Error = error::Error;
 
     fn try_from(value: OtapArrowRecords) -> Result<Self> {
         match value {
             OtapArrowRecords::Logs(logs) => Ok(logs),
-            OtapArrowRecords::Traces(_) => Err(error::Error::UnexpectedSignalType {
-                found: SignalType::Traces,
-                expected: SignalType::Logs,
-            }),
-            OtapArrowRecords::Metrics(_) => Err(error::Error::UnexpectedSignalType {
-                found: SignalType::Metrics,
+            other => Err(error::Error::UnexpectedSignalType {
+                found: other.signal_type(),
                 expected: SignalType::Logs,
             }),
         }
@@ -222,12 +241,8 @@ impl TryFrom<OtapArrowRecords> for Metrics {
     fn try_from(value: OtapArrowRecords) -> Result<Self> {
         match value {
             OtapArrowRecords::Metrics(metrics) => Ok(metrics),
-            OtapArrowRecords::Logs(_) => Err(error::Error::UnexpectedSignalType {
-                found: SignalType::Logs,
-                expected: SignalType::Metrics,
-            }),
-            OtapArrowRecords::Traces(_) => Err(error::Error::UnexpectedSignalType {
-                found: SignalType::Traces,
+            other => Err(error::Error::UnexpectedSignalType {
+                found: other.signal_type(),
                 expected: SignalType::Metrics,
             }),
         }
@@ -240,13 +255,23 @@ impl TryFrom<OtapArrowRecords> for Traces {
     fn try_from(value: OtapArrowRecords) -> Result<Self> {
         match value {
             OtapArrowRecords::Traces(traces) => Ok(traces),
-            OtapArrowRecords::Logs(_) => Err(error::Error::UnexpectedSignalType {
-                found: SignalType::Logs,
+            other => Err(error::Error::UnexpectedSignalType {
+                found: other.signal_type(),
                 expected: SignalType::Traces,
             }),
-            OtapArrowRecords::Metrics(_) => Err(error::Error::UnexpectedSignalType {
-                found: SignalType::Metrics,
-                expected: SignalType::Traces,
+        }
+    }
+}
+
+impl TryFrom<OtapArrowRecords> for Profiles {
+    type Error = error::Error;
+
+    fn try_from(value: OtapArrowRecords) -> Result<Self> {
+        match value {
+            OtapArrowRecords::Profiles(profiles) => Ok(profiles),
+            other => Err(error::Error::UnexpectedSignalType {
+                found: other.signal_type(),
+                expected: SignalType::Profiles,
             }),
         }
     }
@@ -532,9 +557,6 @@ const DATA_POINTS_TYPES: [ArrowPayloadType; 4] = [
 /// define these.
 #[must_use]
 fn num_items(batches: &[Option<RecordBatch>]) -> usize {
-    // TODO(profiles): add a raw_batch_store::PROFILES_COUNT arm (sample-row
-    // count) when `OtapArrowRecords::Profiles` is wired up, or an 11-slot
-    // store will hit the unreachable fallback at runtime.
     match batches.len() {
         raw_batch_store::LOGS_COUNT => batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]]
             .as_ref()
@@ -550,6 +572,21 @@ fn num_items(batches: &[Option<RecordBatch>]) -> usize {
         raw_batch_store::TRACES_COUNT => batches[POSITION_LOOKUP[ArrowPayloadType::Spans as usize]]
             .as_ref()
             .map_or(0, |batch| batch.num_rows()),
+        // For profiles the interesting unit of work is the sample; fall back
+        // to the profile count when there are no samples (whether the SAMPLE
+        // table is absent or merely empty — the two must count identically).
+        raw_batch_store::PROFILES_COUNT => {
+            let samples = batches[POSITION_LOOKUP[ArrowPayloadType::Sample as usize]]
+                .as_ref()
+                .map_or(0, |batch| batch.num_rows());
+            if samples > 0 {
+                samples
+            } else {
+                batches[POSITION_LOOKUP[ArrowPayloadType::Profiles as usize]]
+                    .as_ref()
+                    .map_or(0, |batch| batch.num_rows())
+            }
+        }
         _ => {
             unreachable!()
         }
@@ -988,6 +1025,133 @@ impl OtapBatchStore for Traces {
     }
 }
 
+/// Store of record batches for a batch of OTAP profiles data.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Profiles {
+    inner: raw_batch_store::RawProfilesStore,
+}
+
+impl Profiles {
+    /// Consume this validated store and return the underlying
+    /// [`RawProfilesStore`](raw_batch_store::RawProfilesStore).
+    #[must_use]
+    pub fn into_raw(self) -> raw_batch_store::RawProfilesStore {
+        self.inner
+    }
+}
+
+impl TryFrom<raw_batch_store::RawProfilesStore> for Profiles {
+    type Error = error::Error;
+
+    fn try_from(raw: raw_batch_store::RawProfilesStore) -> Result<Self> {
+        validate_raw_batches(&raw, Self::allowed_payload_types())?;
+        Ok(Self { inner: raw })
+    }
+}
+
+impl sealed::OtapBatchStore for Profiles {
+    fn batches_mut(&mut self) -> &mut [Option<RecordBatch>] {
+        self.inner.batches_mut()
+    }
+}
+
+impl OtapBatchStore for Profiles {
+    const COUNT: usize = raw_batch_store::PROFILES_COUNT;
+
+    const SIGNAL_TYPE: SignalType = SignalType::Profiles;
+
+    type BatchArray = [Option<RecordBatch>; Profiles::COUNT];
+
+    fn into_batches(self) -> Self::BatchArray {
+        self.inner.into_batches()
+    }
+
+    fn allowed_payload_types() -> &'static [ArrowPayloadType] {
+        raw_batch_store::PROFILES_PAYLOAD_TYPES
+    }
+
+    fn decode_transport_optimized_ids(otap_batch: &mut OtapArrowRecords) -> Result<()> {
+        // The interned lookup tables carry no transport-optimized encodings
+        // (they are index-referenced), so removing encodings is a no-op for
+        // them; only the Profiles root, Sample, and the shared attrs change.
+        for payload_type in Self::allowed_payload_types().iter().copied() {
+            if let Some(rb) = otap_batch.get(payload_type) {
+                let rb = remove_transport_optimized_encodings(payload_type, rb)?;
+                otap_batch.set(payload_type, rb)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn encode_transport_optimized(otap_batch: &mut OtapArrowRecords) -> Result<()> {
+        // apply encoding to the root profiles record
+        if let Some(rb) = otap_batch.get(ArrowPayloadType::Profiles) {
+            let (rb, id_remappings) =
+                apply_transport_optimized_encodings(&ArrowPayloadType::Profiles, rb)?;
+            otap_batch.set(ArrowPayloadType::Profiles, rb)?;
+
+            // remap any of the child IDs if necessary. Only the parent-id
+            // joined children (Sample, resource/scope attrs) are remapped;
+            // the interned lookup tables are referenced by row index and
+            // must never be reordered or remapped.
+            if let Some(id_remappings) = id_remappings {
+                for id_remapping in id_remappings {
+                    let child_payload_type = match id_remapping.column_path {
+                        RESOURCE_ID_COL_PATH => ArrowPayloadType::ResourceAttrs,
+                        SCOPE_ID_COL_PATH => ArrowPayloadType::ScopeAttrs,
+                        consts::ID => ArrowPayloadType::Sample,
+                        _ => continue,
+                    };
+                    if let Some(child_rb) = otap_batch.get(child_payload_type) {
+                        let rb = remap_parent_ids(
+                            &child_payload_type,
+                            child_rb,
+                            &id_remapping.remapped_ids,
+                        )?;
+                        otap_batch.set(child_payload_type, rb)?;
+                    }
+                }
+            }
+        }
+
+        // apply any encodings to the parent-id joined children
+        for payload_type in [
+            ArrowPayloadType::Sample,
+            ArrowPayloadType::ResourceAttrs,
+            ArrowPayloadType::ScopeAttrs,
+        ] {
+            if let Some(rb) = otap_batch.get(payload_type) {
+                let (rb, _) = apply_transport_optimized_encodings(&payload_type, rb)?;
+                otap_batch.set(payload_type, rb)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn set(&mut self, payload_type: ArrowPayloadType, record_batch: RecordBatch) -> Result<()> {
+        validated_set(
+            &mut self.inner,
+            Self::SIGNAL_TYPE,
+            payload_type,
+            record_batch,
+        )
+    }
+
+    fn remove(&mut self, payload_type: ArrowPayloadType) {
+        validated_remove(&mut self.inner, payload_type);
+    }
+
+    fn get(&self, payload_type: ArrowPayloadType) -> Option<&RecordBatch> {
+        self.inner.get(payload_type)
+    }
+
+    fn num_items(&self) -> usize {
+        num_items(self.inner.batches())
+    }
+}
+
 /// Return the child payload types for the given payload type
 /// TODO [JD]: This is pretty much made obsolete by payload_relations
 #[must_use]
@@ -1035,6 +1199,14 @@ pub const fn child_payload_types(payload_type: ArrowPayloadType) -> &'static [Ar
         ArrowPayloadType::ExpHistogramDpExemplars => {
             &[ArrowPayloadType::ExpHistogramDpExemplarAttrs]
         }
+        // Sample is the only parent-id joined child of the profiles root;
+        // the interned lookup tables are referenced by row index, not by a
+        // parent_id join, so they are not children in this sense.
+        ArrowPayloadType::Profiles => &[
+            ArrowPayloadType::ResourceAttrs,
+            ArrowPayloadType::ScopeAttrs,
+            ArrowPayloadType::Sample,
+        ],
         _ => &[],
     }
 }
@@ -1060,11 +1232,7 @@ pub const fn parent_payload_type(payload_type: ArrowPayloadType) -> Option<Paren
         // The profiles lookup tables (Mapping/Location/Function/Link/String/
         // AttributeTable/AttributeUnits) are referenced by numeric index from
         // Profile/Sample/Mapping/Location rows, not by a `parent_id` join, so
-        // they have no parent payload type in this join-based sense. This
-        // function isn't yet reachable for any profiles payload type (there
-        // is no `OtapArrowRecords::Profiles` variant routing through it);
-        // revisit if/when profiles are wired into the filter/reindex helpers
-        // that consume this function.
+        // they have no parent payload type in this join-based sense.
         ArrowPayloadType::MappingTable
         | ArrowPayloadType::LocationTable
         | ArrowPayloadType::FunctionTable

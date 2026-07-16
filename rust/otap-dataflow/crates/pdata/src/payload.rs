@@ -199,6 +199,7 @@ impl OtapPayloadHelpers for OtapArrowRecords {
             Self::Logs(_) => SignalType::Logs,
             Self::Metrics(_) => SignalType::Metrics,
             Self::Traces(_) => SignalType::Traces,
+            Self::Profiles(_) => SignalType::Profiles,
         }
     }
 
@@ -211,6 +212,7 @@ impl OtapPayloadHelpers for OtapArrowRecords {
             Self::Logs(value) => Self::Logs(std::mem::take(value)),
             Self::Metrics(value) => Self::Metrics(std::mem::take(value)),
             Self::Traces(value) => Self::Traces(std::mem::take(value)),
+            Self::Profiles(value) => Self::Profiles(std::mem::take(value)),
         }
     }
 
@@ -225,6 +227,9 @@ impl OtapPayloadHelpers for OtapArrowRecords {
             Self::Metrics(_) => self
                 .get(crate::proto::opentelemetry::arrow::v1::ArrowPayloadType::UnivariateMetrics)
                 .is_none_or(|batch| batch.num_rows() == 0),
+            Self::Profiles(_) => self
+                .get(crate::proto::opentelemetry::arrow::v1::ArrowPayloadType::Profiles)
+                .is_none_or(|batch| batch.num_rows() == 0),
         }
     }
 
@@ -233,6 +238,7 @@ impl OtapPayloadHelpers for OtapArrowRecords {
             Self::Logs(records) => records.num_items(),
             Self::Traces(records) => records.num_items(),
             Self::Metrics(records) => records.num_items(),
+            Self::Profiles(records) => records.num_items(),
         }
     }
 }
@@ -243,6 +249,7 @@ impl OtapPayloadHelpers for OtlpProtoBytes {
             Self::ExportLogsRequest(_) => SignalType::Logs,
             Self::ExportMetricsRequest(_) => SignalType::Metrics,
             Self::ExportTracesRequest(_) => SignalType::Traces,
+            Self::ExportProfilesRequest(_) => SignalType::Profiles,
         }
     }
 
@@ -255,6 +262,7 @@ impl OtapPayloadHelpers for OtlpProtoBytes {
             Self::ExportLogsRequest(bytes) => bytes.is_empty(),
             Self::ExportMetricsRequest(bytes) => bytes.is_empty(),
             Self::ExportTracesRequest(bytes) => bytes.is_empty(),
+            Self::ExportProfilesRequest(bytes) => bytes.is_empty(),
         }
     }
 
@@ -263,6 +271,9 @@ impl OtapPayloadHelpers for OtlpProtoBytes {
             Self::ExportLogsRequest(value) => Self::ExportLogsRequest(std::mem::take(value)),
             Self::ExportMetricsRequest(value) => Self::ExportMetricsRequest(std::mem::take(value)),
             Self::ExportTracesRequest(value) => Self::ExportTracesRequest(std::mem::take(value)),
+            Self::ExportProfilesRequest(value) => {
+                Self::ExportProfilesRequest(std::mem::take(value))
+            }
         }
     }
 
@@ -333,6 +344,11 @@ impl OtapPayloadHelpers for OtlpProtoBytes {
                     })
                     .sum()
             }
+            // TODO(profiles): there is no `otap_df_pdata_views` OTLP-bytes view
+            // for profiles yet (see `Error::ProfilesNotImplemented`), so we
+            // can't cheaply count samples without full proto deserialization.
+            // Revisit once the profiles OTLP-bytes view lands.
+            Self::ExportProfilesRequest(_) => 0,
         }
     }
 }
@@ -409,6 +425,9 @@ impl TryFromWithOptions<OtapArrowRecords> for OtlpProtoBytes {
                 traces_encoder.encode(&mut value, &mut buffer)?;
                 Ok(Self::ExportTracesRequest(buffer.into_bytes()))
             }
+            OtapArrowRecords::Profiles(_) => Err(Error::ProfilesNotImplemented {
+                feature: "OTAP profiles -> OTLP proto encode",
+            }),
         }
     }
 }
@@ -439,6 +458,10 @@ impl TryFromWithOptions<OtlpProtoBytes> for OtapArrowRecords {
 
                 Ok(otap_batch)
             }
+            OtlpProtoBytes::ExportProfilesRequest(_) => Err(Error::ProfilesNotImplemented {
+                feature: "OTLP proto -> OTAP profiles decode",
+            }
+            .into()),
         }
     }
 }

@@ -204,6 +204,9 @@ impl OTAPReceiver {
             SignalType::Logs => states.logs.as_ref(),
             SignalType::Metrics => states.metrics.as_ref(),
             SignalType::Traces => states.traces.as_ref(),
+            // No OTAP Arrow gRPC service is registered yet for profiles, so
+            // there is no subscription map to route through.
+            SignalType::Profiles => None,
         };
 
         state
@@ -223,6 +226,9 @@ impl OTAPReceiver {
             SignalType::Logs => states.logs.as_ref(),
             SignalType::Metrics => states.metrics.as_ref(),
             SignalType::Traces => states.traces.as_ref(),
+            // No OTAP Arrow gRPC service is registered yet for profiles, so
+            // there is no subscription map to route through.
+            SignalType::Profiles => None,
         };
 
         state

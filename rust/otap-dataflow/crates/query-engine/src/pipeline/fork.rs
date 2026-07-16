@@ -10,15 +10,15 @@ use datafusion::{
 };
 use otap_df_pdata::{
     OtapArrowRecords, OtapPayloadHelpers,
-    otap::{Logs, Metrics, Traces},
+    otap::{Logs, Metrics, Profiles, Traces},
 };
 
 use crate::pipeline::{BoxedPipelineStage, PipelineStage, state::ExecutionState};
 use crate::{
     error::Result,
     pipeline::concat::{
-        concatenate_logs, concatenate_metrics, concatenate_traces, reindex_logs, reindex_metrics,
-        reindex_traces,
+        concatenate_logs, concatenate_metrics, concatenate_profiles, concatenate_traces,
+        reindex_logs, reindex_metrics, reindex_profiles, reindex_traces,
     },
 };
 
@@ -94,6 +94,7 @@ impl PipelineStage for ForkPipelineStage {
                 OtapArrowRecords::Logs(_) => OtapArrowRecords::Logs(Logs::default()),
                 OtapArrowRecords::Metrics(_) => OtapArrowRecords::Metrics(Metrics::default()),
                 OtapArrowRecords::Traces(_) => OtapArrowRecords::Traces(Traces::default()),
+                OtapArrowRecords::Profiles(_) => OtapArrowRecords::Profiles(Profiles::default()),
             }),
 
             // only one branch returned a non-empty result, simply return this
@@ -112,6 +113,10 @@ impl PipelineStage for ForkPipelineStage {
                 OtapArrowRecords::Traces(_) => {
                     reindex_traces(&mut self.branch_results)?;
                     concatenate_traces(&mut self.branch_results)
+                }
+                OtapArrowRecords::Profiles(_) => {
+                    reindex_profiles(&mut self.branch_results)?;
+                    concatenate_profiles(&mut self.branch_results)
                 }
             },
         }

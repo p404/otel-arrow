@@ -182,6 +182,9 @@ impl TrafficProducer {
                     SignalType::Traces => self.generator.generate_traces(leftover_count),
                     SignalType::Metrics => self.generator.generate_metrics(leftover_count),
                     SignalType::Logs => self.generator.generate_logs(leftover_count),
+                    SignalType::Profiles => Err(GenerateError::Configuration(
+                        "profiles are not yet supported by the traffic generator".to_string(),
+                    )),
                 }?;
 
                 payloads.push(new_batch);
@@ -228,6 +231,9 @@ impl<'a> Iterator for TrafficRun<'a> {
                     SignalType::Traces => self.generator.generate_traces(count),
                     SignalType::Metrics => self.generator.generate_metrics(count),
                     SignalType::Logs => self.generator.generate_logs(count),
+                    SignalType::Profiles => Err(GenerateError::Configuration(
+                        "profiles are not yet supported by the traffic generator".to_string(),
+                    )),
                 }
             }
             ProductionStrategy::Replay { payloads, .. } => Ok(payloads[self.idx].clone()),
@@ -368,6 +374,9 @@ fn create_fresh_payloads(
             SignalType::Traces => generator.generate_traces(*count),
             SignalType::Metrics => generator.generate_metrics(*count),
             SignalType::Logs => generator.generate_logs(*count),
+            SignalType::Profiles => Err(GenerateError::Configuration(
+                "profiles are not yet supported by the traffic generator".to_string(),
+            )),
         })
         .collect()
 }

@@ -341,6 +341,22 @@ impl Exporter<OtapPdata> for OtlpHttpExporter {
                 }) => _ = metrics_reporter.report(&mut self.pdata_metrics),
                 Message::PData(pdata) => {
                     let signal_type = pdata.signal_type();
+
+                    if signal_type == SignalType::Profiles {
+                        // No `profiles_endpoint` config or OTLP profiles HTTP
+                        // export path exists yet. Nack clearly rather than
+                        // silently dropping the batch or panicking deeper in
+                        // the encode/endpoint-selection logic below.
+                        self.pdata_metrics.add_failed(signal_type, 1);
+                        let mut nack = NackMsg::new(
+                            "profiles are not yet supported by the OTLP HTTP exporter",
+                            pdata,
+                        );
+                        nack.permanent = true;
+                        _ = effect_handler.notify_nack(nack).await;
+                        continue;
+                    }
+
                     let (context, payload) = pdata.into_parts();
 
                     // For the OtapArrowRecords path we keep the uncompressed bytes in
@@ -379,6 +395,13 @@ impl Exporter<OtapPdata> for OtlpHttpExporter {
                                         .encode(&mut otap_batch, &mut proto_buffer),
                                     SignalType::Traces => traces_proto_encoder
                                         .encode(&mut otap_batch, &mut proto_buffer),
+                                    // Unreachable: `Message::PData` nacks and
+                                    // `continue`s for `SignalType::Profiles`
+                                    // before this point (no
+                                    // `ProfilesProtoBytesEncoder` exists yet).
+                                    SignalType::Profiles => {
+                                        unreachable!("profiles is nacked before encoding")
+                                    }
                                 };
 
                             if !context.may_return_payload() {
@@ -435,6 +458,9 @@ impl Exporter<OtapPdata> for OtlpHttpExporter {
                         SignalType::Logs => &logs_endpoint,
                         SignalType::Metrics => &metrics_endpoint,
                         SignalType::Traces => &traces_endpoint,
+                        // Unreachable: nacked and `continue`d above (no
+                        // `profiles_endpoint` config exists yet).
+                        SignalType::Profiles => unreachable!("profiles is nacked above"),
                     });
 
                     let max_response_body_len = self.config.max_response_body_length;
@@ -619,6 +645,10 @@ async fn query_result_to_service_response(
         SignalType::Logs => ExportLogsServiceResponse::decode(&mut body).map(Into::into),
         SignalType::Metrics => ExportMetricsServiceResponse::decode(&mut body).map(Into::into),
         SignalType::Traces => ExportTraceServiceResponse::decode(&mut body).map(Into::into),
+        // Unreachable: `SignalType::Profiles` is nacked before any HTTP
+        // request is made (no `profiles_endpoint` config exists yet), so this
+        // function is never called with it.
+        SignalType::Profiles => unreachable!("profiles is nacked before any request is sent"),
     };
 
     Ok(service_resp?)
@@ -1523,6 +1553,7 @@ mod test {
                                     &[OtlpProtoMessage::Traces(traces_batch.clone())],
                                 );
                             }
+                            SignalType::Profiles => unreachable!("test does not send profiles"),
                         }
                     }
 
@@ -2184,6 +2215,7 @@ mod test {
                                     &[OtlpProtoMessage::Traces(traces_batch.clone())],
                                 );
                             }
+                            SignalType::Profiles => unreachable!("test does not send profiles"),
                         }
                     }
 

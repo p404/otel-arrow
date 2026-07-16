@@ -179,6 +179,9 @@ impl local::Exporter<OtapPdata> for PerfExporter {
                         SignalType::Traces => {
                             self.metrics.spans.add(num_items);
                         }
+                        SignalType::Profiles => {
+                            self.metrics.profiles.add(num_items);
+                        }
                     }
 
                     // ToDo (LQ) We need to introduce pdata headers without hpack encoding for data coming from other nodes

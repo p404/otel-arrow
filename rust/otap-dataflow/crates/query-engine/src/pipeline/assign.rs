@@ -605,6 +605,12 @@ impl AssignPipelineStage {
                     OtapArrowRecords::Logs(_) => ArrowPayloadType::LogAttrs,
                     OtapArrowRecords::Metrics(_) => ArrowPayloadType::MetricAttrs,
                     OtapArrowRecords::Traces(_) => ArrowPayloadType::SpanAttrs,
+                    OtapArrowRecords::Profiles(_) => {
+                        return Err(Error::InvalidPipelineError {
+                            cause: "profiles are not yet supported by the query engine".to_string(),
+                            query_location: None,
+                        });
+                    }
                 };
                 let id_col = root_record_batch.column_by_name(consts::ID);
                 (attrs_payload_type, id_col)
@@ -840,6 +846,12 @@ impl AssignPipelineStage {
                 OtapArrowRecords::Logs(_) => ArrowPayloadType::LogAttrs,
                 OtapArrowRecords::Metrics(_) => ArrowPayloadType::MetricAttrs,
                 OtapArrowRecords::Traces(_) => ArrowPayloadType::SpanAttrs,
+                OtapArrowRecords::Profiles(_) => {
+                    return Err(Error::InvalidPipelineError {
+                        cause: "profiles are not yet supported by the query engine".to_string(),
+                        query_location: None,
+                    });
+                }
             },
             AttributesIdentifier::NonRoot(payload_type) => payload_type,
         };

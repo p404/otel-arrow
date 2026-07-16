@@ -103,6 +103,29 @@ macro_rules! metrics {
 }
 pub use metrics;
 
+/// Build a [`Profiles`] store from payload‑type / column specs.
+///
+/// Missing required columns are automatically filled in using the schema spec.
+/// Use `.into()` to convert to [`OtapArrowRecords`], or `.into_batches()` to
+/// get the raw `[Option<RecordBatch>; Profiles::COUNT]` array.
+#[macro_export]
+macro_rules! profiles {
+    ($(($payload:ident, $($record_batch_args:tt)*)),* $(,)?) => {
+        {
+            use $crate::otap::Profiles;
+            use $crate::proto::opentelemetry::arrow::v1::ArrowPayloadType;
+
+            $crate::otap::testing::make_test_batch::<Profiles, { Profiles::COUNT }>(vec![
+                $((
+                    ArrowPayloadType::$payload,
+                    $crate::record_batch!($($record_batch_args)*).unwrap(),
+                ),)*
+            ])
+        }
+    };
+}
+pub use profiles;
+
 /// Pre-process a test batch before spec-driven completion.
 ///
 /// 1. Groups dotted column names (e.g., "resource.id", "resource.schema_url") by prefix

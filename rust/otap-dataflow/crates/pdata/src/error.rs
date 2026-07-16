@@ -246,6 +246,9 @@ pub enum Error {
         found: SignalType,
         expected: SignalType,
     },
+
+    #[error("{feature} is not yet implemented for the profiles signal")]
+    ProfilesNotImplemented { feature: &'static str },
 }
 
 impl From<crate::otlp::common::Dropped> for Error {

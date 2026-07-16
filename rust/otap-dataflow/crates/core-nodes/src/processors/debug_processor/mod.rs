@@ -381,6 +381,14 @@ impl local::Processor<OtapPdata> for DebugProcessor {
                         }
                         self.metrics.traces_consumed.add(1);
                     }
+                    OtlpProtoBytes::ExportProfilesRequest(_bytes) => {
+                        // Profiles decoding/printing is not implemented yet
+                        // (no `SignalActive::Profiles` config option, no
+                        // `process_profile` path). Count it so consumption
+                        // is still observable, but don't attempt to decode
+                        // or print it.
+                        self.metrics.profiles_consumed.add(1);
+                    }
                 }
                 Ok(())
             }

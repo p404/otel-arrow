@@ -44,6 +44,8 @@ pub enum OtlpProtoBytes {
     ExportMetricsRequest(Bytes),
     /// protobuf serialized ExportTracesServiceRequest
     ExportTracesRequest(Bytes),
+    /// protobuf serialized ExportProfilesServiceRequest
+    ExportProfilesRequest(Bytes),
 }
 
 impl OtlpProtoBytes {
@@ -58,6 +60,7 @@ impl OtlpProtoBytes {
             SignalType::Logs => Self::ExportLogsRequest(bytes),
             SignalType::Metrics => Self::ExportMetricsRequest(bytes),
             SignalType::Traces => Self::ExportTracesRequest(bytes),
+            SignalType::Profiles => Self::ExportProfilesRequest(bytes),
         }
     }
 
@@ -69,6 +72,7 @@ impl OtlpProtoBytes {
             SignalType::Logs => Self::ExportLogsRequest(b),
             SignalType::Metrics => Self::ExportMetricsRequest(b),
             SignalType::Traces => Self::ExportTracesRequest(b),
+            SignalType::Profiles => Self::ExportProfilesRequest(b),
         }
     }
 
@@ -78,7 +82,8 @@ impl OtlpProtoBytes {
         match self {
             OtlpProtoBytes::ExportLogsRequest(bytes)
             | OtlpProtoBytes::ExportMetricsRequest(bytes)
-            | OtlpProtoBytes::ExportTracesRequest(bytes) => bytes.as_ref(),
+            | OtlpProtoBytes::ExportTracesRequest(bytes)
+            | OtlpProtoBytes::ExportProfilesRequest(bytes) => bytes.as_ref(),
         }
     }
 
@@ -88,6 +93,7 @@ impl OtlpProtoBytes {
             OtlpProtoBytes::ExportLogsRequest(bytes) => std::mem::replace(bytes, new_bytes),
             OtlpProtoBytes::ExportMetricsRequest(bytes) => std::mem::replace(bytes, new_bytes),
             OtlpProtoBytes::ExportTracesRequest(bytes) => std::mem::replace(bytes, new_bytes),
+            OtlpProtoBytes::ExportProfilesRequest(bytes) => std::mem::replace(bytes, new_bytes),
         }
     }
 
@@ -97,7 +103,8 @@ impl OtlpProtoBytes {
         match self {
             OtlpProtoBytes::ExportLogsRequest(bytes)
             | OtlpProtoBytes::ExportMetricsRequest(bytes)
-            | OtlpProtoBytes::ExportTracesRequest(bytes) => bytes.clone(),
+            | OtlpProtoBytes::ExportTracesRequest(bytes)
+            | OtlpProtoBytes::ExportProfilesRequest(bytes) => bytes.clone(),
         }
     }
 

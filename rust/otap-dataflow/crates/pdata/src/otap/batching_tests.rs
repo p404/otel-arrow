@@ -396,3 +396,50 @@ fn test_comprehensive_batch_metrics() {
         }
     }
 }
+
+/// Profiles batching is not fixture-generator based yet (no OTLP profiles
+/// generator/converter exists); this exercises `make_item_batches` directly
+/// against hand-built `Profiles` OTAP batches.
+///
+/// It verifies two things:
+///   1. Concatenation (no `max_items`) for profiles is a clear, typed
+///      "not implemented" error: the generic machinery row-stacks the interned
+///      lookup tables without rebasing the absolute row-index references into
+///      them, which would silently corrupt merged batches. A real profiles
+///      concatenate must merge the tables and rewrite the index columns first.
+///   2. Splitting (`max_items: Some(_)`) for profiles is likewise a typed
+///      "not implemented" error rather than a panic or silently-wrong split.
+#[test]
+fn test_profiles_batching_concatenate_and_split_not_implemented() {
+    use crate::otap::{OtapArrowRecords, OtapBatchStore as _};
+    use crate::record_batch;
+    use otap_df_config::SignalType;
+
+    let make_profile = |id: u16| -> OtapArrowRecords {
+        crate::profiles!((Profiles, ("id", UInt16, vec![id]))).into()
+    };
+
+    // Concatenation (no size limit): must refuse rather than corrupt the
+    // interned tables' row-index references.
+    let inputs: Vec<OtapArrowRecords> = vec![make_profile(0), make_profile(0), make_profile(0)];
+    let err = make_item_batches(SignalType::Profiles, None, inputs)
+        .expect_err("profiles concatenation must report not-implemented, not corrupt indices");
+    assert!(
+        matches!(err, crate::error::Error::ProfilesNotImplemented { .. }),
+        "unexpected error variant: {err:?}"
+    );
+
+    // Splitting (size limit set): not yet implemented, must be a typed error,
+    // not a panic.
+    let inputs: Vec<OtapArrowRecords> = vec![make_profile(0), make_profile(0)];
+    let err = make_item_batches(
+        SignalType::Profiles,
+        Some(NonZeroU64::new(1).unwrap()),
+        inputs,
+    )
+    .expect_err("profiles split should report not-implemented, not silently succeed");
+    assert!(
+        matches!(err, crate::error::Error::ProfilesNotImplemented { .. }),
+        "unexpected error variant: {err:?}"
+    );
+}

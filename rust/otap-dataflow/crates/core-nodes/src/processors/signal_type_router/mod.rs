@@ -81,6 +81,8 @@ pub const PORT_TRACES: &str = "traces";
 pub const PORT_METRICS: &str = "metrics";
 /// Name of the output port used for log signals
 pub const PORT_LOGS: &str = "logs";
+/// Name of the output port used for profile signals
+pub const PORT_PROFILES: &str = "profiles";
 
 /// Metrics for the SignalTypeRouter processor.
 #[metric_set(name = "processor.signal_type_router")]
@@ -95,6 +97,9 @@ pub struct SignalTypeRouterMetrics {
     /// Number of trace messages received by the router.
     #[metric(unit = "{msg}")]
     pub signals_received_traces: Counter<u64>,
+    /// Number of profile messages received by the router.
+    #[metric(unit = "{msg}")]
+    pub signals_received_profiles: Counter<u64>,
 
     /// Number of log messages routed to a named port.
     #[metric(unit = "{msg}")]
@@ -105,6 +110,9 @@ pub struct SignalTypeRouterMetrics {
     /// Number of trace messages routed to a named port.
     #[metric(unit = "{msg}")]
     pub signals_routed_named_traces: Counter<u64>,
+    /// Number of profile messages routed to a named port.
+    #[metric(unit = "{msg}")]
+    pub signals_routed_named_profiles: Counter<u64>,
 
     /// Number of log messages routed via the default port.
     #[metric(unit = "{msg}")]
@@ -115,6 +123,9 @@ pub struct SignalTypeRouterMetrics {
     /// Number of trace messages routed via the default port.
     #[metric(unit = "{msg}")]
     pub signals_routed_default_traces: Counter<u64>,
+    /// Number of profile messages routed via the default port.
+    #[metric(unit = "{msg}")]
+    pub signals_routed_default_profiles: Counter<u64>,
 
     /// Number of log messages NACKed due to route-local rejection.
     #[metric(unit = "{msg}")]
@@ -125,6 +136,9 @@ pub struct SignalTypeRouterMetrics {
     /// Number of trace messages NACKed due to route-local rejection.
     #[metric(unit = "{msg}")]
     pub signals_nacked_traces: Counter<u64>,
+    /// Number of profile messages NACKed due to route-local rejection.
+    #[metric(unit = "{msg}")]
+    pub signals_nacked_profiles: Counter<u64>,
 
     /// Number of log messages rejected because the selected route was full.
     #[metric(unit = "{msg}")]
@@ -135,6 +149,9 @@ pub struct SignalTypeRouterMetrics {
     /// Number of trace messages rejected because the selected route was full.
     #[metric(unit = "{msg}")]
     pub signals_rejected_route_full_traces: Counter<u64>,
+    /// Number of profile messages rejected because the selected route was full.
+    #[metric(unit = "{msg}")]
+    pub signals_rejected_route_full_profiles: Counter<u64>,
 
     /// Number of log messages rejected because the selected route was closed.
     #[metric(unit = "{msg}")]
@@ -145,6 +162,9 @@ pub struct SignalTypeRouterMetrics {
     /// Number of trace messages rejected because the selected route was closed.
     #[metric(unit = "{msg}")]
     pub signals_rejected_route_closed_traces: Counter<u64>,
+    /// Number of profile messages rejected because the selected route was closed.
+    #[metric(unit = "{msg}")]
+    pub signals_rejected_route_closed_profiles: Counter<u64>,
 
     /// Number of log messages dropped due to routing failure.
     #[metric(unit = "{msg}")]
@@ -155,6 +175,9 @@ pub struct SignalTypeRouterMetrics {
     /// Number of trace messages dropped due to routing failure.
     #[metric(unit = "{msg}")]
     pub signals_dropped_traces: Counter<u64>,
+    /// Number of profile messages dropped due to routing failure.
+    #[metric(unit = "{msg}")]
+    pub signals_dropped_profiles: Counter<u64>,
 }
 
 impl SignalTypeRouterMetrics {
@@ -163,6 +186,7 @@ impl SignalTypeRouterMetrics {
             otap_df_config::SignalType::Logs => self.signals_received_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_received_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_received_traces.inc(),
+            otap_df_config::SignalType::Profiles => self.signals_received_profiles.inc(),
         }
     }
     const fn inc_routed_named(&mut self, st: otap_df_config::SignalType) {
@@ -170,6 +194,7 @@ impl SignalTypeRouterMetrics {
             otap_df_config::SignalType::Logs => self.signals_routed_named_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_routed_named_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_routed_named_traces.inc(),
+            otap_df_config::SignalType::Profiles => self.signals_routed_named_profiles.inc(),
         }
     }
     const fn inc_routed_default(&mut self, st: otap_df_config::SignalType) {
@@ -177,6 +202,7 @@ impl SignalTypeRouterMetrics {
             otap_df_config::SignalType::Logs => self.signals_routed_default_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_routed_default_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_routed_default_traces.inc(),
+            otap_df_config::SignalType::Profiles => self.signals_routed_default_profiles.inc(),
         }
     }
     const fn inc_nacked(&mut self, st: otap_df_config::SignalType) {
@@ -184,6 +210,7 @@ impl SignalTypeRouterMetrics {
             otap_df_config::SignalType::Logs => self.signals_nacked_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_nacked_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_nacked_traces.inc(),
+            otap_df_config::SignalType::Profiles => self.signals_nacked_profiles.inc(),
         }
     }
     const fn inc_rejected_route_full(&mut self, st: otap_df_config::SignalType) {
@@ -191,6 +218,7 @@ impl SignalTypeRouterMetrics {
             otap_df_config::SignalType::Logs => self.signals_rejected_route_full_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_rejected_route_full_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_rejected_route_full_traces.inc(),
+            otap_df_config::SignalType::Profiles => self.signals_rejected_route_full_profiles.inc(),
         }
     }
     const fn inc_rejected_route_closed(&mut self, st: otap_df_config::SignalType) {
@@ -198,6 +226,9 @@ impl SignalTypeRouterMetrics {
             otap_df_config::SignalType::Logs => self.signals_rejected_route_closed_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_rejected_route_closed_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_rejected_route_closed_traces.inc(),
+            otap_df_config::SignalType::Profiles => {
+                self.signals_rejected_route_closed_profiles.inc()
+            }
         }
     }
     const fn inc_dropped(&mut self, st: otap_df_config::SignalType) {
@@ -205,6 +236,7 @@ impl SignalTypeRouterMetrics {
             otap_df_config::SignalType::Logs => self.signals_dropped_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_dropped_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_dropped_traces.inc(),
+            otap_df_config::SignalType::Profiles => self.signals_dropped_profiles.inc(),
         }
     }
 }
@@ -294,6 +326,7 @@ impl SignalTypeRouter {
             PortName::from(PORT_LOGS),
             PortName::from(PORT_METRICS),
             PortName::from(PORT_TRACES),
+            PortName::from(PORT_PROFILES),
         ];
         let default_reachable = named_ports.iter().any(|port| !connected.contains(port));
 
@@ -551,6 +584,7 @@ impl local::Processor<OtapPdata> for SignalTypeRouter {
                     otap_df_config::SignalType::Traces => PORT_TRACES,
                     otap_df_config::SignalType::Metrics => PORT_METRICS,
                     otap_df_config::SignalType::Logs => PORT_LOGS,
+                    otap_df_config::SignalType::Profiles => PORT_PROFILES,
                 };
 
                 // Probe wiring first so send failures on the named port stay
@@ -1297,6 +1331,7 @@ mod tests {
                 otap_df_config::SignalType::Logs => "logs",
                 otap_df_config::SignalType::Metrics => "metrics",
                 otap_df_config::SignalType::Traces => "traces",
+                otap_df_config::SignalType::Profiles => "profiles",
             }
         }
 
@@ -1307,6 +1342,9 @@ mod tests {
                     OtapArrowRecords::Metrics(Default::default())
                 }
                 otap_df_config::SignalType::Traces => OtapArrowRecords::Traces(Default::default()),
+                otap_df_config::SignalType::Profiles => {
+                    OtapArrowRecords::Profiles(Default::default())
+                }
             }
         }
 
@@ -1315,6 +1353,7 @@ mod tests {
                 otap_df_config::SignalType::Logs => PORT_LOGS,
                 otap_df_config::SignalType::Metrics => PORT_METRICS,
                 otap_df_config::SignalType::Traces => PORT_TRACES,
+                otap_df_config::SignalType::Profiles => PORT_PROFILES,
             }
         }
 

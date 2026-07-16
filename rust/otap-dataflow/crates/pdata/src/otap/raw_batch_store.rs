@@ -146,10 +146,6 @@ pub const TRACES_COUNT: usize = 8;
 /// scope-level attributes travel in the shared `ResourceAttrs`/`ScopeAttrs`
 /// side-tables (joined via the embedded resource/scope `id`), exactly as for
 /// the other signals; the remaining types are the profiles-specific tables.
-///
-/// Not yet wired up to an `OtapArrowRecords::Profiles` variant (Stage 0a is
-/// pdata-schema-only); reserved for a later stage.
-#[allow(dead_code)]
 pub const PROFILES_PAYLOAD_TYPES: &[ArrowPayloadType; PROFILES_COUNT] = &[
     ArrowPayloadType::ResourceAttrs,
     ArrowPayloadType::ScopeAttrs,
@@ -165,10 +161,6 @@ pub const PROFILES_PAYLOAD_TYPES: &[ArrowPayloadType; PROFILES_COUNT] = &[
 ];
 
 /// Bitmask of valid [`ArrowPayloadType`] values for the Profiles signal.
-///
-/// Not yet wired up to an `OtapArrowRecords::Profiles` variant (Stage 0a is
-/// pdata-schema-only); reserved for a later stage.
-#[allow(dead_code)]
 pub const PROFILES_TYPE_MASK: u64 = (1 << ArrowPayloadType::ResourceAttrs as u64)
     + (1 << ArrowPayloadType::ScopeAttrs as u64)
     + (1 << ArrowPayloadType::Profiles as u64)
@@ -182,7 +174,6 @@ pub const PROFILES_TYPE_MASK: u64 = (1 << ArrowPayloadType::ResourceAttrs as u64
     + (1 << ArrowPayloadType::AttributeUnits as u64);
 
 /// Number of payload slots for the Profiles signal.
-#[allow(dead_code)]
 pub const PROFILES_COUNT: usize = 11;
 
 // ---------------------------------------------------------------------------
@@ -199,10 +190,6 @@ pub type RawMetricsStore = RawBatchStore<METRICS_TYPE_MASK, METRICS_COUNT>;
 pub type RawTracesStore = RawBatchStore<TRACES_TYPE_MASK, TRACES_COUNT>;
 
 /// Raw (unvalidated) batch store for the Profiles signal.
-///
-/// Not yet wired up to an `OtapArrowRecords::Profiles` variant (Stage 0a is
-/// pdata-schema-only); reserved for a later stage.
-#[allow(dead_code)]
 pub type RawProfilesStore = RawBatchStore<PROFILES_TYPE_MASK, PROFILES_COUNT>;
 
 // ---------------------------------------------------------------------------
@@ -352,7 +339,7 @@ mod tests {
     /// and `false` for every other known payload type.
     #[test]
     fn type_mask_matches_allowed_payload_types() {
-        use crate::otap::{Logs, Metrics, OtapBatchStore, Traces};
+        use crate::otap::{Logs, Metrics, OtapBatchStore, Profiles, Traces};
         use std::collections::HashSet;
 
         // Union of all known payload types across all signals, plus Unknown.
@@ -360,6 +347,7 @@ mod tests {
             .chain(Logs::allowed_payload_types().iter().copied())
             .chain(Metrics::allowed_payload_types().iter().copied())
             .chain(Traces::allowed_payload_types().iter().copied())
+            .chain(Profiles::allowed_payload_types().iter().copied())
             .collect();
 
         let cases: &[(&str, fn(ArrowPayloadType) -> bool, &[ArrowPayloadType])] = &[
@@ -377,6 +365,11 @@ mod tests {
                 "Traces",
                 RawTracesStore::is_valid_type,
                 Traces::allowed_payload_types(),
+            ),
+            (
+                "Profiles",
+                RawProfilesStore::is_valid_type,
+                Profiles::allowed_payload_types(),
             ),
         ];
 

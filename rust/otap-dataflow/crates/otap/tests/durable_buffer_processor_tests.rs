@@ -366,7 +366,11 @@ const IDX_QUEUED_METRIC_POINTS: usize = 28;
 const IDX_QUEUED_SPANS: usize = 29;
 const IDX_FLUSH_FAILURES: usize = 30;
 
-const DURABLE_BUFFER_METRIC_COUNT: usize = 38;
+// 7 profiles metrics (rejected/consumed/produced/requeued/queued/dropped/expired
+// profile_samples) were appended after `DurableBufferMetrics`'s existing fields
+// following Stage 0b profiles signal registration; they don't shift any of the
+// indices above.
+const DURABLE_BUFFER_METRIC_COUNT: usize = 45;
 
 /// Collected metrics from a pipeline run, aggregated across all telemetry snapshots.
 #[derive(Debug, Default)]

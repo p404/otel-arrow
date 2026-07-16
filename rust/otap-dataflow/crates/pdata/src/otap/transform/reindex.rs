@@ -95,7 +95,7 @@ use crate::otap::transform::util::{
     extract_id_column, payload_to_idx, remove_record_batch_ranges, replace_column,
     sort_record_batch_by_indices,
 };
-use crate::otap::{Logs, Metrics, OtapBatchStore, Traces};
+use crate::otap::{Logs, Metrics, OtapBatchStore, Profiles, Traces};
 use crate::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use crate::schema::consts::{ID, PARENT_ID};
 
@@ -117,6 +117,7 @@ pub fn reindex<const N: usize>(batches: &mut [[Option<RecordBatch>; N]]) -> Resu
         Logs::COUNT => reindex_logs::<{ N }>(batches),
         Metrics::COUNT => reindex_metrics::<{ N }>(batches),
         Traces::COUNT => reindex_traces::<{ N }>(batches),
+        Profiles::COUNT => reindex_profiles::<{ N }>(batches),
         _ => unreachable!(),
     }
 }
@@ -180,6 +181,11 @@ pub fn reindex_metrics<const N: usize>(metrics: &mut [[Option<RecordBatch>; N]])
 
 pub fn reindex_traces<const N: usize>(traces: &mut [[Option<RecordBatch>; N]]) -> Result<()> {
     let mut store = MultiBatchStore::<Traces, { N }>::new(traces);
+    reindex_batch_store(&mut store)
+}
+
+pub fn reindex_profiles<const N: usize>(profiles: &mut [[Option<RecordBatch>; N]]) -> Result<()> {
+    let mut store = MultiBatchStore::<Profiles, { N }>::new(profiles);
     reindex_batch_store(&mut store)
 }
 

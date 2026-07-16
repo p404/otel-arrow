@@ -590,6 +590,18 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
                         let signal_type = pdata.signal_type();
 
                         self.pdata_metrics.inc_consumed(signal_type);
+
+                        if signal_type == SignalType::Profiles {
+                            // No Arrow gRPC service/stream-worker pool exists yet
+                            // for profiles (see `ArrowLogsServiceClient` and its
+                            // siblings above), so there is nowhere to route this
+                            // batch. Nack it clearly rather than silently
+                            // dropping it or panicking.
+                            self.pdata_metrics.inc_failed(signal_type);
+                            effect_handler.notify_nack(NackMsg::new("profiles are not yet supported by the OTAP exporter", pdata)).await?;
+                            continue;
+                        }
+
                         let payload = pdata.take_payload();
 
                         let message: OtapArrowRecords = match payload.try_into_with_default() {
@@ -609,6 +621,7 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
                             SignalType::Logs => least_loaded_stream_sender(&logs_senders),
                             SignalType::Metrics => least_loaded_stream_sender(&metrics_senders),
                             SignalType::Traces => least_loaded_stream_sender(&traces_senders),
+                            SignalType::Profiles => unreachable!("handled above"),
                         };
                         self.enqueue_stream_batch(
                             sender,

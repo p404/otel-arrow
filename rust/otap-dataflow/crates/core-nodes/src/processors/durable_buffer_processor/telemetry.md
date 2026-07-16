@@ -109,6 +109,23 @@ The effective instrument name is `otap.processor.durable_buffer.<field_name>`.
 | `otap.processor.durable_buffer.queued_metric_points` | `{data_point}` | Gauge | Current metric data points queued in durable storage/segments awaiting downstream ACK. Seeded from existing segments on restart. | `crates/core-nodes/src/processors/durable_buffer_processor/mod.rs` |
 | `otap.processor.durable_buffer.queued_spans` | `{span}` | Gauge | Current spans queued in durable storage/segments awaiting downstream ACK. Seeded from existing segments on restart. | `crates/core-nodes/src/processors/durable_buffer_processor/mod.rs` |
 
+### Profiles Item Metrics
+
+Declared together at the end of `DurableBufferMetrics` (rather than beside
+their logs/metrics/traces siblings above) to preserve the existing positional
+indices of every metric declared before them -- several tests read
+`MetricSet::get_metrics()` by hardcoded index.
+
+| Metric name | Unit | Instrument | Description | Produced in file |
+| --- | --- | --- | --- | --- |
+| `otap.processor.durable_buffer.rejected_profile_samples` | `{sample}` | Counter | Number of profile samples in permanently rejected bundles. | `crates/core-nodes/src/processors/durable_buffer_processor/mod.rs` |
+| `otap.processor.durable_buffer.consumed_profile_samples` | `{sample}` | Counter | Number of profile samples ingested to durable storage. | `crates/core-nodes/src/processors/durable_buffer_processor/mod.rs` |
+| `otap.processor.durable_buffer.produced_profile_samples` | `{sample}` | Counter | Number of profile samples sent downstream. | `crates/core-nodes/src/processors/durable_buffer_processor/mod.rs` |
+| `otap.processor.durable_buffer.requeued_profile_samples` | `{sample}` | Counter | Cumulative profile samples in bundles requeued for retry after NACK. | `crates/core-nodes/src/processors/durable_buffer_processor/mod.rs` |
+| `otap.processor.durable_buffer.queued_profile_samples` | `{sample}` | Gauge | Current profile samples queued in durable storage/segments awaiting downstream ACK. Seeded from existing segments on restart. | `crates/core-nodes/src/processors/durable_buffer_processor/mod.rs` |
+| `otap.processor.durable_buffer.dropped_profile_samples` | `{sample}` | Counter | Profile samples lost due to force-dropped segments (`DropOldest`). Aggregated across all Arrow profiles slots. | `crates/core-nodes/src/processors/durable_buffer_processor/mod.rs` |
+| `otap.processor.durable_buffer.expired_profile_samples` | `{sample}` | Counter | Profile samples lost due to `max_age` segment expiry. Aggregated across all Arrow profiles slots. | `crates/core-nodes/src/processors/durable_buffer_processor/mod.rs` |
+
 ## Logs
 
 All events are emitted from

@@ -202,6 +202,17 @@ impl local::Processor<OtapPdata> for FilterProcessor {
                                     )?;
                                 Ok((filtered, consumed, filtered_count))
                             }
+                            SignalType::Profiles => {
+                                // No profile filter config/DSL exists yet
+                                // (`self.config` has no `profile_filters()`).
+                                Err(Error::ProcessorError {
+                                    processor: effect_handler.processor_id(),
+                                    kind: ProcessorErrorKind::Other,
+                                    error: "profiles are not yet supported by the filter processor"
+                                        .to_string(),
+                                    source_detail: String::new(),
+                                })
+                            }
                         }
                     })?;
 
@@ -218,6 +229,10 @@ impl local::Processor<OtapPdata> for FilterProcessor {
                         self.metrics.span_signals_consumed.add(signals_consumed);
                         self.metrics.span_signals_filtered.add(signals_filtered);
                     }
+                    // Unreachable: the `Profiles` arm above always returns
+                    // `Err` (via the `?` on the `.timed(...)` call), so
+                    // `signal` can't be `Profiles` here.
+                    SignalType::Profiles => unreachable!(),
                 }
 
                 // Record the drop flow-metric. A no-op unless this node is

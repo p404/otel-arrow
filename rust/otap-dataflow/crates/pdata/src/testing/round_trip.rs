@@ -59,6 +59,9 @@ pub fn otlp_bytes_to_message(msg: OtlpProtoBytes) -> OtlpProtoMessage {
             let td = TracesData::decode(b).expect("decode should not fail");
             OtlpProtoMessage::Traces(td)
         }
+        OtlpProtoBytes::ExportProfilesRequest(_) => {
+            panic!("profiles OTLP proto conversion is not yet implemented")
+        }
     }
 }
 
@@ -78,6 +81,9 @@ pub fn otap_to_otlp(otap: &OtapArrowRecords) -> OtlpProtoMessage {
         }
         OtlpProtoBytes::ExportMetricsRequest(bytes) => {
             MetricsData::decode(bytes.as_ref()).map(OtlpProtoMessage::Metrics)
+        }
+        OtlpProtoBytes::ExportProfilesRequest(_) => {
+            panic!("profiles OTLP proto conversion is not yet implemented")
         }
     }
     .expect("decode ok")

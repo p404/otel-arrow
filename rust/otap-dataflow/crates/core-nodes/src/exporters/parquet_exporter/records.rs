@@ -38,6 +38,14 @@ impl From<OtapArrowRecords> for OtapParquetRecords {
             OtapArrowRecords::Logs(l) => Self::Logs(l.into_raw()),
             OtapArrowRecords::Metrics(m) => Self::Metrics(m.into_raw()),
             OtapArrowRecords::Traces(t) => Self::Traces(t.into_raw()),
+            // `OtapParquetRecords` has no `Profiles` variant yet: Parquet
+            // export of profiles is a separate follow-on feature (schema
+            // mapping, partitioning, file naming). The exporter's message
+            // loop (`mod.rs`) rejects profiles pdata before it can reach
+            // this conversion.
+            OtapArrowRecords::Profiles(_) => {
+                unreachable!("profiles is rejected before reaching this conversion")
+            }
         }
     }
 }

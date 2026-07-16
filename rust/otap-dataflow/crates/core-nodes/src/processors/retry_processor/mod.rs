@@ -211,6 +211,9 @@ pub struct RetryProcessorMetrics {
     /// Number of items consumed (traces) with outcome=success
     #[metric(unit = "{item}")]
     pub consumed_items_traces_success: Counter<u64>,
+    /// Number of items consumed (profiles) with outcome=success
+    #[metric(unit = "{item}")]
+    pub consumed_items_profiles_success: Counter<u64>,
 
     /// Number of items consumed (logs) with outcome=failure
     #[metric(unit = "{item}")]
@@ -221,6 +224,9 @@ pub struct RetryProcessorMetrics {
     /// Number of items consumed (traces) with outcome=failure
     #[metric(unit = "{item}")]
     pub consumed_items_traces_failure: Counter<u64>,
+    /// Number of items consumed (profiles) with outcome=failure
+    #[metric(unit = "{item}")]
+    pub consumed_items_profiles_failure: Counter<u64>,
 
     /// Number of items consumed (logs) with outcome=refused
     #[metric(unit = "{item}")]
@@ -231,6 +237,9 @@ pub struct RetryProcessorMetrics {
     /// Number of items consumed (traces) with outcome=refused
     #[metric(unit = "{item}")]
     pub consumed_items_traces_refused: Counter<u64>,
+    /// Number of items consumed (profiles) with outcome=refused
+    #[metric(unit = "{item}")]
+    pub consumed_items_profiles_refused: Counter<u64>,
 
     // RFC-aligned: produced items by signal and outcome
     /// Number of items produced (logs) with outcome=success
@@ -242,6 +251,9 @@ pub struct RetryProcessorMetrics {
     /// Number of items produced (traces) with outcome=success
     #[metric(unit = "{item}")]
     pub produced_items_traces_success: Counter<u64>,
+    /// Number of items produced (profiles) with outcome=success
+    #[metric(unit = "{item}")]
+    pub produced_items_profiles_success: Counter<u64>,
 
     /// Number of items produced (logs) with outcome=refused (downstream error)
     #[metric(unit = "{item}")]
@@ -252,6 +264,9 @@ pub struct RetryProcessorMetrics {
     /// Number of items produced (traces) with outcome=refused (downstream error)
     #[metric(unit = "{item}")]
     pub produced_items_traces_refused: Counter<u64>,
+    /// Number of items produced (profiles) with outcome=refused (downstream error)
+    #[metric(unit = "{item}")]
+    pub produced_items_profiles_refused: Counter<u64>,
 
     /// Number of retry attempts scheduled as a result of NACKs, logs.
     #[metric(unit = "{event}")]
@@ -262,6 +277,9 @@ pub struct RetryProcessorMetrics {
     /// Number of retry attempts scheduled as a result of NACKs, metrics.
     #[metric(unit = "{event}")]
     pub retry_attempts_metrics: Counter<u64>,
+    /// Number of retry attempts scheduled as a result of NACKs, profiles.
+    #[metric(unit = "{event}")]
+    pub retry_attempts_profiles: Counter<u64>,
 }
 
 impl RetryProcessorMetrics {
@@ -271,6 +289,7 @@ impl RetryProcessorMetrics {
             SignalType::Logs => self.consumed_items_logs_success.add(n),
             SignalType::Metrics => self.consumed_items_metrics_success.add(n),
             SignalType::Traces => self.consumed_items_traces_success.add(n),
+            SignalType::Profiles => self.consumed_items_profiles_success.add(n),
         }
     }
     /// Increment consumed.items with outcome=failure for the given signal by n
@@ -279,6 +298,7 @@ impl RetryProcessorMetrics {
             SignalType::Logs => self.consumed_items_logs_failure.add(n),
             SignalType::Metrics => self.consumed_items_metrics_failure.add(n),
             SignalType::Traces => self.consumed_items_traces_failure.add(n),
+            SignalType::Profiles => self.consumed_items_profiles_failure.add(n),
         }
     }
     /// Increment consumed.items with outcome=refused for the given signal by n
@@ -287,6 +307,7 @@ impl RetryProcessorMetrics {
             SignalType::Logs => self.consumed_items_logs_refused.add(n),
             SignalType::Metrics => self.consumed_items_metrics_refused.add(n),
             SignalType::Traces => self.consumed_items_traces_refused.add(n),
+            SignalType::Profiles => self.consumed_items_profiles_refused.add(n),
         }
     }
 
@@ -296,6 +317,7 @@ impl RetryProcessorMetrics {
             SignalType::Logs => self.produced_items_logs_success.add(n),
             SignalType::Metrics => self.produced_items_metrics_success.add(n),
             SignalType::Traces => self.produced_items_traces_success.add(n),
+            SignalType::Profiles => self.produced_items_profiles_success.add(n),
         }
     }
     /// Increment produced.items with outcome=refused for the given signal by n
@@ -304,6 +326,7 @@ impl RetryProcessorMetrics {
             SignalType::Logs => self.produced_items_logs_refused.add(n),
             SignalType::Metrics => self.produced_items_metrics_refused.add(n),
             SignalType::Traces => self.produced_items_traces_refused.add(n),
+            SignalType::Profiles => self.produced_items_profiles_refused.add(n),
         }
     }
 
@@ -313,6 +336,7 @@ impl RetryProcessorMetrics {
             SignalType::Logs => self.retry_attempts_logs.add(1),
             SignalType::Metrics => self.retry_attempts_metrics.add(1),
             SignalType::Traces => self.retry_attempts_traces.add(1),
+            SignalType::Profiles => self.retry_attempts_profiles.add(1),
         }
     }
 }
