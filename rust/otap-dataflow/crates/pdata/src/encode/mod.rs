@@ -13,7 +13,10 @@ pub use error::{Error, Result};
 
 use crate::{
     encode::record::{
-        attributes::{AttributesRecordBatchBuilder, AttributesRecordBatchBuilderConstructorHelper},
+        attributes::{
+            AnyValuesRecordsBuilder, AttributesRecordBatchBuilder,
+            AttributesRecordBatchBuilderConstructorHelper,
+        },
         logs::LogsRecordBatchBuilder,
         metrics::{
             BucketsRecordBatchBuilder, ExemplarsRecordBatchBuilder,
@@ -21,9 +24,15 @@ use crate::{
             HistogramDataPointsRecordBatchBuilder, MetricsRecordBatchBuilder,
             NumberDataPointsRecordBatchBuilder, SummaryDataPointsRecordBatchBuilder,
         },
+        profiles::{
+            AttributeTableRecordBatchBuilder, AttributeUnitsRecordBatchBuilder,
+            FunctionTableRecordBatchBuilder, LinkTableRecordBatchBuilder,
+            LocationTableRecordBatchBuilder, MappingTableRecordBatchBuilder,
+            ProfilesRecordBatchBuilder, SampleRecordBatchBuilder, StringTableRecordBatchBuilder,
+        },
         traces::{EventsRecordBatchBuilder, LinksRecordBatchBuilder, TracesRecordBatchBuilder},
     },
-    otap::{Logs, Metrics, OtapArrowRecords, Traces},
+    otap::{Logs, Metrics, OtapArrowRecords, Profiles, Traces},
     otlp::attributes::parent_id::ParentId,
     proto::opentelemetry::arrow::v1::ArrowPayloadType,
 };
@@ -38,6 +47,11 @@ use otap_df_pdata_views::views::metrics::{
     ExponentialHistogramView, GaugeView, HistogramDataPointView, HistogramView, MetricView,
     MetricsView, NumberDataPointView, ResourceMetricsView, ScopeMetricsView, SumView,
     SummaryDataPointView, SummaryView, ValueAtQuantileView,
+};
+use otap_df_pdata_views::views::profiles::{
+    AttributeUnitView, FunctionView, LineView, LinkView as ProfileLinkView, LocationView,
+    MappingView, ProfileView, ProfilesDataView, ResourceProfilesView, SampleView,
+    ScopeProfilesView, ValueTypeView,
 };
 use otap_df_pdata_views::views::resource::ResourceView;
 use otap_df_pdata_views::views::trace::{
@@ -539,39 +553,44 @@ where
 {
     let key = kv.key();
     attribute_rb_builder.append_key(key);
+    append_any_value(&mut attribute_rb_builder.any_values_builder, kv.value())
+}
 
-    if let Some(val) = kv.value() {
+/// Append a single attribute value to the value lanes of an
+/// [`AnyValuesRecordsBuilder`], routing on the value's type (`Array`/
+/// `KeyValueList` values are serialized as CBOR into the `ser` lane).
+/// `None` is appended as the empty value.
+fn append_any_value<'val, V>(
+    any_values_builder: &mut AnyValuesRecordsBuilder,
+    val: Option<V>,
+) -> Result<()>
+where
+    V: AnyValueView<'val> + 'val,
+{
+    if let Some(val) = val {
         match val.value_type() {
             ValueType::String => {
-                attribute_rb_builder
-                    .any_values_builder
-                    .append_str(val.as_string().expect("value to be string"));
+                any_values_builder.append_str(val.as_string().expect("value to be string"));
             }
-            ValueType::Int64 => attribute_rb_builder
-                .any_values_builder
-                .append_int(val.as_int64().expect("value to be int64")),
+            ValueType::Int64 => {
+                any_values_builder.append_int(val.as_int64().expect("value to be int64"))
+            }
             ValueType::Double => {
-                attribute_rb_builder
-                    .any_values_builder
-                    .append_double(val.as_double().expect("value to be double"));
+                any_values_builder.append_double(val.as_double().expect("value to be double"));
             }
             ValueType::Bool => {
-                attribute_rb_builder
-                    .any_values_builder
-                    .append_bool(val.as_bool().expect("value to be bool"));
+                any_values_builder.append_bool(val.as_bool().expect("value to be bool"));
             }
-            ValueType::Bytes => attribute_rb_builder
-                .any_values_builder
-                .append_bytes(val.as_bytes().expect("value to be bytes")),
+            ValueType::Bytes => {
+                any_values_builder.append_bytes(val.as_bytes().expect("value to be bytes"))
+            }
             ValueType::Array => {
                 let mut serialized_values = vec![];
                 cbor::serialize_any_values(
                     val.as_array().expect("value to be array"),
                     &mut serialized_values,
                 )?;
-                attribute_rb_builder
-                    .any_values_builder
-                    .append_slice(&serialized_values)
+                any_values_builder.append_slice(&serialized_values)
             }
             ValueType::KeyValueList => {
                 let mut serialized_value = vec![];
@@ -579,16 +598,14 @@ where
                     val.as_kvlist().expect("value is kvlist"),
                     &mut serialized_value,
                 )?;
-                attribute_rb_builder
-                    .any_values_builder
-                    .append_map(&serialized_value);
+                any_values_builder.append_map(&serialized_value);
             }
             ValueType::Empty => {
-                attribute_rb_builder.any_values_builder.append_empty();
+                any_values_builder.append_empty();
             }
         }
     } else {
-        attribute_rb_builder.any_values_builder.append_empty();
+        any_values_builder.append_empty();
     }
 
     Ok(())
@@ -993,6 +1010,246 @@ where
         ),
         (summary.finish()?, ArrowPayloadType::SummaryDataPoints),
         (summary_attrs.finish()?, ArrowPayloadType::SummaryDpAttrs),
+    ];
+    for (rb, payload_type) in pairs {
+        if rb.num_rows() > 0 {
+            otap_batch.set(payload_type, rb)?;
+        }
+    }
+
+    Ok(otap_batch)
+}
+
+/// Traverse the profiles structure within the ProfilesDataView and produce an
+/// `OtapArrowRecords` for the profile data.
+///
+/// OTLP profiles is already a dictionary-normalized model, so this encode is a
+/// faithful columnar transposition: each OTLP lookup table (string/function/
+/// mapping/location/link/attribute/attribute-units) becomes its OTAP interned
+/// table with row order and indices preserved verbatim (`id` = row position),
+/// and every index/strindex value in the Profile/Sample rows is copied as-is.
+/// Nothing is re-interned, deduped or reordered — byte-identical OTLP
+/// round-tripping requires index identity. Only the `Profiles` root and the
+/// `Sample` child are "real" row streams; resource and scope attributes go to
+/// the shared parent-id-keyed side tables exactly like the other signals.
+pub fn encode_profiles_otap_batch<T>(profiles_view: &T) -> Result<OtapArrowRecords>
+where
+    T: ProfilesDataView,
+{
+    let mut resource_attrs = AttributesRecordBatchBuilder::<u16>::new();
+    let mut scope_attrs = AttributesRecordBatchBuilder::<u16>::new();
+
+    let mut profiles = ProfilesRecordBatchBuilder::new();
+    let mut samples = SampleRecordBatchBuilder::new();
+
+    let mut curr_resource_id: u16 = 0;
+    let mut curr_scope_id: u16 = 0;
+    let mut curr_profile_id: u16 = 0;
+
+    // First, traverse the resource -> scope -> profile -> sample tree,
+    // collecting the data into the record batch builders.
+
+    for resource_profiles in profiles_view.resources() {
+        let resource_profile_count: usize = resource_profiles
+            .scopes()
+            .map(|scope| scope.profiles().count())
+            .sum();
+
+        let resource_dropped_attributes_count = if let Some(resource) = resource_profiles.resource()
+        {
+            for kv in resource.attributes() {
+                resource_attrs.append_parent_id(&curr_resource_id);
+                append_attribute_value(&mut resource_attrs, &kv)?;
+            }
+            resource.dropped_attributes_count()
+        } else {
+            0
+        };
+
+        profiles
+            .resource
+            .append_id_n(curr_resource_id, resource_profile_count);
+        profiles
+            .resource
+            .append_schema_url_n(resource_profiles.schema_url(), resource_profile_count);
+        profiles.resource.append_dropped_attributes_count_n(
+            resource_dropped_attributes_count,
+            resource_profile_count,
+        );
+
+        for scope_profiles in resource_profiles.scopes() {
+            let scope_profile_count = scope_profiles.profiles().count();
+
+            let scope = scope_profiles.scope();
+            let scope_name = scope.as_ref().and_then(|s| s.name());
+            let scope_version = scope.as_ref().and_then(|s| s.version());
+            let scope_dropped_attributes_count = scope
+                .as_ref()
+                .map(|s| s.dropped_attributes_count())
+                .unwrap_or(0);
+            profiles
+                .scope
+                .append_id_n(curr_scope_id, scope_profile_count);
+            profiles
+                .scope
+                .append_name_n(scope_name, scope_profile_count);
+            profiles
+                .scope
+                .append_version_n(scope_version, scope_profile_count);
+            profiles.scope.append_dropped_attributes_count_n(
+                scope_dropped_attributes_count,
+                scope_profile_count,
+            );
+            if let Some(scope) = scope {
+                for kv in scope.attributes() {
+                    scope_attrs.append_parent_id(&curr_scope_id);
+                    append_attribute_value(&mut scope_attrs, &kv)?;
+                }
+            }
+
+            for profile in scope_profiles.profiles() {
+                profiles.append_id(curr_profile_id);
+                profiles.append_schema_url(scope_profiles.schema_url());
+                profiles.append_time_nanos(profile.time_nanos());
+                profiles.append_duration_nanos(profile.duration_nanos());
+                profiles.append_period(profile.period());
+                profiles.append_period_type(profile.period_type().map(|vt| {
+                    (
+                        vt.type_strindex(),
+                        vt.unit_strindex(),
+                        vt.aggregation_temporality(),
+                    )
+                }));
+                profiles.append_sample_types(profile.sample_types().map(|vt| {
+                    (
+                        vt.type_strindex(),
+                        vt.unit_strindex(),
+                        vt.aggregation_temporality(),
+                    )
+                }));
+                profiles.append_default_sample_type_index(profile.default_sample_type_index());
+                profiles.append_profile_id(profile.profile_id())?;
+                profiles.append_dropped_attributes_count(profile.dropped_attributes_count());
+                profiles.append_original_payload_format(profile.original_payload_format());
+                profiles.append_original_payload(profile.original_payload());
+                profiles.append_location_indices(profile.location_indices());
+                profiles.append_comment_strindices(profile.comment_strindices());
+                profiles.append_attribute_indices(profile.attribute_indices());
+
+                for sample in profile.samples() {
+                    samples.append_parent_id(curr_profile_id);
+                    samples.append_locations_start_index(sample.locations_start_index());
+                    samples.append_locations_length(sample.locations_length());
+                    samples.append_values(sample.values());
+                    samples.append_attribute_indices(sample.attribute_indices());
+                    samples.append_link_index(sample.link_index());
+                    samples.append_timestamps_unix_nano(sample.timestamps_unix_nano());
+                }
+
+                curr_profile_id = curr_profile_id
+                    .checked_add(1)
+                    .ok_or(Error::U16OverflowError)?;
+            }
+
+            curr_scope_id = curr_scope_id
+                .checked_add(1)
+                .ok_or(Error::U16OverflowError)?;
+        }
+
+        curr_resource_id = curr_resource_id
+            .checked_add(1)
+            .ok_or(Error::U16OverflowError)?;
+    }
+
+    // Then, transpose the interned lookup tables verbatim: table order is
+    // identity, so `id` is exactly the input row position and every field is
+    // copied as-is with no re-interning, dedup or reordering.
+
+    let mut string_table = StringTableRecordBatchBuilder::new();
+    for (i, entry) in profiles_view.string_table().enumerate() {
+        let id = u32::try_from(i).map_err(|_| Error::U32OverflowError)?;
+        string_table.append(id, entry);
+    }
+
+    let mut function_table = FunctionTableRecordBatchBuilder::new();
+    for (i, function) in profiles_view.function_table().enumerate() {
+        let id = u32::try_from(i).map_err(|_| Error::U32OverflowError)?;
+        function_table.append_id(id);
+        function_table.append_name_strindex(function.name_strindex());
+        function_table.append_system_name_strindex(function.system_name_strindex());
+        function_table.append_filename_strindex(function.filename_strindex());
+        function_table.append_start_line(function.start_line());
+    }
+
+    let mut mapping_table = MappingTableRecordBatchBuilder::new();
+    for (i, mapping) in profiles_view.mapping_table().enumerate() {
+        let id = u32::try_from(i).map_err(|_| Error::U32OverflowError)?;
+        mapping_table.append_id(id);
+        mapping_table.append_memory_start(mapping.memory_start());
+        mapping_table.append_memory_limit(mapping.memory_limit());
+        mapping_table.append_file_offset(mapping.file_offset());
+        mapping_table.append_filename_strindex(mapping.filename_strindex());
+        mapping_table.append_has_functions(mapping.has_functions());
+        mapping_table.append_has_filenames(mapping.has_filenames());
+        mapping_table.append_has_line_numbers(mapping.has_line_numbers());
+        mapping_table.append_has_inline_frames(mapping.has_inline_frames());
+        mapping_table.append_attribute_indices(mapping.attribute_indices());
+    }
+
+    let mut location_table = LocationTableRecordBatchBuilder::new();
+    for (i, location) in profiles_view.location_table().enumerate() {
+        let id = u32::try_from(i).map_err(|_| Error::U32OverflowError)?;
+        location_table.append_id(id);
+        location_table.append_mapping_index(location.mapping_index());
+        location_table.append_address(location.address());
+        location_table.append_is_folded(location.is_folded());
+        location_table.append_attribute_indices(location.attribute_indices());
+        location_table.append_lines(
+            location
+                .lines()
+                .map(|line| (line.function_index(), line.line(), line.column())),
+        );
+    }
+
+    let mut link_table = LinkTableRecordBatchBuilder::new();
+    for (i, link) in profiles_view.link_table().enumerate() {
+        let id = u32::try_from(i).map_err(|_| Error::U32OverflowError)?;
+        link_table.append_id(id);
+        link_table.append_trace_id(link.trace_id())?;
+        link_table.append_span_id(link.span_id())?;
+    }
+
+    let mut attribute_table = AttributeTableRecordBatchBuilder::new();
+    for (i, kv) in profiles_view.attribute_table().enumerate() {
+        let id = u32::try_from(i).map_err(|_| Error::U32OverflowError)?;
+        attribute_table.append_id(id);
+        attribute_table.append_key(kv.key());
+        append_any_value(&mut attribute_table.any_values_builder, kv.value())?;
+    }
+
+    let mut attribute_units = AttributeUnitsRecordBatchBuilder::new();
+    for (i, unit) in profiles_view.attribute_units().enumerate() {
+        let id = u32::try_from(i).map_err(|_| Error::U32OverflowError)?;
+        attribute_units.append(id, unit.attribute_key_strindex(), unit.unit_strindex());
+    }
+
+    // Finally, build up the OTAP batch from the record batch builders. Only
+    // non-empty record batches are set; an entirely empty `ProfilesData`
+    // yields the default (empty) Profiles store.
+
+    let mut otap_batch = OtapArrowRecords::Profiles(Profiles::default());
+    let pairs = [
+        (profiles.finish()?, ArrowPayloadType::Profiles),
+        (samples.finish()?, ArrowPayloadType::Sample),
+        (resource_attrs.finish()?, ArrowPayloadType::ResourceAttrs),
+        (scope_attrs.finish()?, ArrowPayloadType::ScopeAttrs),
+        (mapping_table.finish()?, ArrowPayloadType::MappingTable),
+        (location_table.finish()?, ArrowPayloadType::LocationTable),
+        (function_table.finish()?, ArrowPayloadType::FunctionTable),
+        (link_table.finish()?, ArrowPayloadType::LinkTable),
+        (string_table.finish()?, ArrowPayloadType::StringTable),
+        (attribute_table.finish()?, ArrowPayloadType::AttributeTable),
+        (attribute_units.finish()?, ArrowPayloadType::AttributeUnits),
     ];
     for (rb, payload_type) in pairs {
         if rb.num_rows() > 0 {
@@ -4927,6 +5184,904 @@ mod test {
         let mut traces_data_bytes = vec![];
         traces_data.encode(&mut traces_data_bytes).unwrap();
         _test_traces_data_all_fields(&RawTraceData::new(&traces_data_bytes));
+    }
+
+    /* ─────────────────────────── profiles encode tests ────────────────── */
+
+    use crate::proto::opentelemetry::profiles::v1development::{
+        AttributeUnit as ProfAttributeUnit, Function as ProfFunction, Line as ProfLine,
+        Link as ProfLink, Location as ProfLocation, Mapping as ProfMapping, Profile, ProfilesData,
+        ResourceProfiles, Sample as ProfSample, ScopeProfiles, ValueType as ProfValueType,
+    };
+
+    /// Build a small but full-featured `ProfilesData`: 2 resources, populated
+    /// interned tables (string/function/mapping/location-with-lines/link/
+    /// attribute/attribute-units), presence-sensitive optional fields
+    /// (`link_index = Some(0)`, `mapping_index = None`), an empty `profile_id`,
+    /// an empty link `trace_id`, and Map/Array valued attributes to exercise
+    /// the CBOR ser lane.
+    fn _generate_profiles_data_full() -> ProfilesData {
+        let sample0 = ProfSample {
+            locations_start_index: 0,
+            locations_length: 2,
+            value: vec![100, 1],
+            attribute_indices: vec![0, 1],
+            link_index: Some(1),
+            timestamps_unix_nano: vec![111, 222],
+        };
+        let sample1 = ProfSample {
+            locations_start_index: 2,
+            locations_length: 1,
+            value: vec![200, 2],
+            attribute_indices: vec![],
+            link_index: None,
+            timestamps_unix_nano: vec![],
+        };
+        // `Some(0)` pins optional-field presence: link table row 0 is a valid
+        // reference and must not be conflated with "not present"
+        let sample2 = ProfSample {
+            locations_start_index: 0,
+            locations_length: 0,
+            value: vec![],
+            attribute_indices: vec![3],
+            link_index: Some(0),
+            timestamps_unix_nano: vec![333],
+        };
+        let sample3 = ProfSample {
+            locations_start_index: 1,
+            locations_length: 1,
+            value: vec![300],
+            attribute_indices: vec![4, 5, 6],
+            link_index: None,
+            timestamps_unix_nano: vec![],
+        };
+
+        let profile0 = Profile {
+            sample_type: vec![
+                ProfValueType {
+                    type_strindex: 7,
+                    unit_strindex: 2,
+                    aggregation_temporality: 1,
+                },
+                ProfValueType {
+                    type_strindex: 8,
+                    unit_strindex: 2,
+                    aggregation_temporality: 2,
+                },
+            ],
+            sample: vec![sample0, sample1],
+            location_indices: vec![0, 1, 2],
+            time_nanos: 1_000_000_000,
+            duration_nanos: 5_000,
+            period_type: Some(ProfValueType {
+                type_strindex: 1,
+                unit_strindex: 2,
+                aggregation_temporality: 0,
+            }),
+            period: 10_000,
+            comment_strindices: vec![6],
+            default_sample_type_index: 1,
+            profile_id: (1..=16).collect(),
+            dropped_attributes_count: 3,
+            original_payload_format: "pprof".to_string(),
+            original_payload: vec![9, 9, 9],
+            attribute_indices: vec![2],
+        };
+        // profile with an EMPTY profile_id (proto default) — must encode as null
+        let profile1 = Profile {
+            sample_type: vec![],
+            sample: vec![sample2],
+            location_indices: vec![],
+            time_nanos: 0,
+            duration_nanos: 0,
+            period_type: None,
+            period: 0,
+            comment_strindices: vec![],
+            default_sample_type_index: 0,
+            profile_id: vec![],
+            dropped_attributes_count: 0,
+            original_payload_format: String::new(),
+            original_payload: vec![],
+            attribute_indices: vec![],
+        };
+        let profile2 = Profile {
+            sample_type: vec![ProfValueType {
+                type_strindex: 7,
+                unit_strindex: 2,
+                aggregation_temporality: 1,
+            }],
+            sample: vec![sample3],
+            location_indices: vec![1],
+            time_nanos: 2_000_000_000,
+            duration_nanos: 1,
+            period_type: Some(ProfValueType {
+                type_strindex: 1,
+                unit_strindex: 2,
+                aggregation_temporality: 2,
+            }),
+            period: 1,
+            comment_strindices: vec![],
+            default_sample_type_index: 0,
+            profile_id: (16..=31).collect(),
+            dropped_attributes_count: 0,
+            original_payload_format: String::new(),
+            original_payload: vec![],
+            attribute_indices: vec![],
+        };
+
+        ProfilesData {
+            resource_profiles: vec![
+                ResourceProfiles {
+                    resource: Some(
+                        Resource::build()
+                            .attributes(vec![
+                                KeyValue::new("res.attr", AnyValue::new_string("host1")),
+                                KeyValue::new("res.num", AnyValue::new_int(42)),
+                            ])
+                            .dropped_attributes_count(1u32)
+                            .finish(),
+                    ),
+                    scope_profiles: vec![ScopeProfiles {
+                        scope: Some(
+                            InstrumentationScope::build()
+                                .name("profiler")
+                                .version("1.0")
+                                .attributes(vec![KeyValue::new(
+                                    "scope.attr",
+                                    AnyValue::new_bool(true),
+                                )])
+                                .dropped_attributes_count(2u32)
+                                .finish(),
+                        ),
+                        profiles: vec![profile0, profile1],
+                        schema_url: "https://scope.schema".to_string(),
+                    }],
+                    schema_url: "https://resource.schema".to_string(),
+                },
+                // resource/scope entirely unknown for the second tree
+                ResourceProfiles {
+                    resource: None,
+                    scope_profiles: vec![ScopeProfiles {
+                        scope: None,
+                        profiles: vec![profile2],
+                        schema_url: String::new(),
+                    }],
+                    schema_url: String::new(),
+                },
+            ],
+            mapping_table: vec![
+                ProfMapping {
+                    memory_start: 0x1000,
+                    memory_limit: 0x2000,
+                    file_offset: 77,
+                    filename_strindex: 4,
+                    attribute_indices: vec![0],
+                    has_functions: true,
+                    has_filenames: false,
+                    has_line_numbers: true,
+                    has_inline_frames: false,
+                },
+                ProfMapping::default(),
+            ],
+            location_table: vec![
+                ProfLocation {
+                    mapping_index: Some(0),
+                    address: 0x1234,
+                    line: vec![
+                        ProfLine {
+                            function_index: 0,
+                            line: 10,
+                            column: 2,
+                        },
+                        ProfLine {
+                            function_index: 2,
+                            line: 20,
+                            column: 0,
+                        },
+                    ],
+                    is_folded: false,
+                    attribute_indices: vec![1],
+                },
+                // `mapping_index` not present — must encode as null, distinct
+                // from `Some(0)` in row 0
+                ProfLocation {
+                    mapping_index: None,
+                    address: 0,
+                    line: vec![],
+                    is_folded: true,
+                    attribute_indices: vec![],
+                },
+                ProfLocation {
+                    mapping_index: Some(1),
+                    address: 0x999,
+                    line: vec![ProfLine {
+                        function_index: 1,
+                        line: 7,
+                        column: 1,
+                    }],
+                    is_folded: false,
+                    attribute_indices: vec![],
+                },
+            ],
+            function_table: vec![
+                ProfFunction {
+                    name_strindex: 3,
+                    system_name_strindex: 3,
+                    filename_strindex: 5,
+                    start_line: 10,
+                },
+                ProfFunction {
+                    name_strindex: 1,
+                    system_name_strindex: 0,
+                    filename_strindex: 0,
+                    start_line: 0,
+                },
+                ProfFunction {
+                    name_strindex: 8,
+                    system_name_strindex: 1,
+                    filename_strindex: 5,
+                    start_line: 42,
+                },
+            ],
+            link_table: vec![
+                ProfLink {
+                    trace_id: (1..=16).collect(),
+                    span_id: (1..=8).collect(),
+                },
+                // link with an EMPTY trace_id (proto default) — must encode as null
+                ProfLink {
+                    trace_id: vec![],
+                    span_id: (9..=16).collect(),
+                },
+            ],
+            string_table: vec![
+                // by convention the string table starts with the empty string
+                "".to_string(),
+                "cpu".to_string(),
+                "nanoseconds".to_string(),
+                "main".to_string(),
+                "libc.so".to_string(),
+                "src/main.rs".to_string(),
+                "a comment".to_string(),
+                "samples".to_string(),
+                "count".to_string(),
+            ],
+            attribute_table: vec![
+                KeyValue::new("thread.name", AnyValue::new_string("main")),
+                KeyValue::new("cpu.core", AnyValue::new_int(3)),
+                KeyValue::new("fraction", AnyValue::new_double(0.5)),
+                KeyValue::new("flag", AnyValue::new_bool(true)),
+                KeyValue::new("blob", AnyValue::new_bytes([1u8, 2, 3])),
+                // Map value — exercises the CBOR `ser` lane
+                KeyValue::new(
+                    "ctx",
+                    AnyValue {
+                        value: Some(any_value::Value::KvlistValue(KeyValueList {
+                            values: vec![KeyValue::new("inner", AnyValue::new_int(5))],
+                        })),
+                    },
+                ),
+                // Array value — also serialized into the `ser` lane
+                KeyValue::new(
+                    "arr",
+                    AnyValue {
+                        value: Some(any_value::Value::ArrayValue(ArrayValue {
+                            values: vec![AnyValue::new_int(1), AnyValue::new_string("x")],
+                        })),
+                    },
+                ),
+            ],
+            attribute_units: vec![
+                ProfAttributeUnit {
+                    attribute_key_strindex: 1,
+                    unit_strindex: 2,
+                },
+                ProfAttributeUnit {
+                    attribute_key_strindex: 7,
+                    unit_strindex: 8,
+                },
+            ],
+        }
+    }
+
+    /// cast a (possibly dictionary-encoded) column to a plain `StringArray`
+    fn profiles_utf8_col(rb: &RecordBatch, name: &str) -> StringArray {
+        let col = rb
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column {name}"));
+        let arr = arrow::compute::cast(col, &DataType::Utf8).expect("cast to utf8");
+        arr.as_any()
+            .downcast_ref::<StringArray>()
+            .expect("utf8 array")
+            .clone()
+    }
+
+    /// cast a (possibly dictionary-encoded) column of any array to the given type
+    fn profiles_cast_col(rb: &RecordBatch, name: &str, dt: &DataType) -> ArrayRef {
+        let col = rb
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column {name}"));
+        arrow::compute::cast(col, dt).expect("cast")
+    }
+
+    /// downcast a plain (non-dictionary) column
+    fn profiles_col<'a, T: 'static>(rb: &'a RecordBatch, name: &str) -> &'a T {
+        rb.column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column {name}"))
+            .as_any()
+            .downcast_ref::<T>()
+            .unwrap_or_else(|| panic!("column {name} has unexpected type"))
+    }
+
+    /// collect a `List<Int32>` column into per-row vectors
+    fn profiles_i32_lists(rb: &RecordBatch, name: &str) -> Vec<Vec<i32>> {
+        let list = profiles_col::<ListArray>(rb, name);
+        (0..list.len())
+            .map(|i| {
+                assert!(!list.is_null(i), "list row {i} of {name} should be valid");
+                list.value(i)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("Int32 list items")
+                    .iter()
+                    .map(|v| v.expect("no null list items"))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// assert every value of a `List<Int32>` column is in `0..bound`
+    fn assert_i32_lists_in_bounds(rb: &RecordBatch, name: &str, bound: i32) {
+        for (i, row) in profiles_i32_lists(rb, name).iter().enumerate() {
+            for val in row {
+                assert!(
+                    (0..bound).contains(val),
+                    "{name} row {i}: index {val} out of bounds 0..{bound}"
+                );
+            }
+        }
+    }
+
+    /// assert every non-null value of a plain `Int32` column is in `0..bound`
+    fn assert_i32_col_in_bounds(rb: &RecordBatch, name: &str, bound: i32) {
+        let col = profiles_col::<Int32Array>(rb, name);
+        for val in col.iter().flatten() {
+            assert!(
+                (0..bound).contains(&val),
+                "{name}: index {val} out of bounds 0..{bound}"
+            );
+        }
+    }
+
+    /// assert that a field carries the `plain` column-encoding metadata
+    fn assert_plain_encoding(rb: &RecordBatch, name: &str) {
+        let field = rb
+            .schema_ref()
+            .field_with_name(name)
+            .unwrap_or_else(|_| panic!("missing field {name}"));
+        assert_eq!(
+            field
+                .metadata()
+                .get(consts::metadata::COLUMN_ENCODING)
+                .map(String::as_str),
+            Some(consts::metadata::encodings::PLAIN),
+            "field {name} should be stamped with plain encoding metadata"
+        );
+    }
+
+    #[test]
+    fn test_encode_profiles_full_fidelity() {
+        let profiles_data = _generate_profiles_data_full();
+        let otap_batch = encode_profiles_otap_batch(&profiles_data).unwrap();
+        assert!(matches!(otap_batch, OtapArrowRecords::Profiles(_)));
+
+        let n_strings = profiles_data.string_table.len() as i32; // 9
+        let n_functions = profiles_data.function_table.len() as i32; // 3
+        let n_mappings = profiles_data.mapping_table.len() as i32; // 2
+        let n_locations = profiles_data.location_table.len() as i32; // 3
+        let n_links = profiles_data.link_table.len() as i32; // 2
+        let n_attrs = profiles_data.attribute_table.len() as i32; // 7
+
+        // ── the Profiles root record ────────────────────────────────────
+        let profiles_rb = otap_batch.get(ArrowPayloadType::Profiles).expect("root");
+        assert_eq!(profiles_rb.num_rows(), 3);
+        assert_plain_encoding(profiles_rb, consts::ID);
+        assert_eq!(
+            profiles_col::<UInt16Array>(profiles_rb, consts::ID).values(),
+            &[0, 1, 2]
+        );
+
+        // resource struct: ids/schema_url/dropped flattened per profile row
+        let resource = profiles_col::<StructArray>(profiles_rb, consts::RESOURCE);
+        let resource_ids = resource
+            .column_by_name(consts::ID)
+            .expect("resource id")
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .expect("resource id is u16");
+        assert_eq!(resource_ids.values(), &[0, 0, 1]);
+        let resource_schema_url = arrow::compute::cast(
+            resource.column_by_name(consts::SCHEMA_URL).expect("url"),
+            &DataType::Utf8,
+        )
+        .unwrap();
+        let resource_schema_url = resource_schema_url
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(resource_schema_url.value(0), "https://resource.schema");
+        assert!(resource_schema_url.is_null(2));
+
+        let scope = profiles_col::<StructArray>(profiles_rb, consts::SCOPE);
+        let scope_ids = scope
+            .column_by_name(consts::ID)
+            .expect("scope id")
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .expect("scope id is u16");
+        assert_eq!(scope_ids.values(), &[0, 0, 1]);
+
+        // scope-level schema_url is flattened onto the profile row
+        let schema_url = profiles_utf8_col(profiles_rb, consts::SCHEMA_URL);
+        assert_eq!(schema_url.value(0), "https://scope.schema");
+        assert_eq!(schema_url.value(1), "https://scope.schema");
+        assert!(schema_url.is_null(2));
+
+        // verbatim scalars (0 included — no zero-to-null mapping)
+        assert_eq!(
+            profiles_col::<TimestampNanosecondArray>(profiles_rb, consts::TIME_NANOS).values(),
+            &[1_000_000_000, 0, 2_000_000_000]
+        );
+        assert_eq!(
+            profiles_col::<Int64Array>(profiles_rb, consts::DURATION_NANOS).values(),
+            &[5_000, 0, 1]
+        );
+        assert_eq!(
+            profiles_col::<Int64Array>(profiles_rb, consts::PERIOD).values(),
+            &[10_000, 0, 1]
+        );
+        assert_eq!(
+            profiles_col::<Int32Array>(profiles_rb, consts::DEFAULT_SAMPLE_TYPE_INDEX).values(),
+            &[1, 0, 0]
+        );
+        assert_eq!(
+            profiles_col::<UInt32Array>(profiles_rb, consts::DROPPED_ATTRIBUTES_COUNT).values(),
+            &[3, 0, 0]
+        );
+
+        // period_type: present/absent per row
+        let period_type = profiles_col::<StructArray>(profiles_rb, consts::PERIOD_TYPE);
+        assert!(!period_type.is_null(0));
+        assert!(period_type.is_null(1));
+        assert!(!period_type.is_null(2));
+        let pt_aggregation = period_type
+            .column_by_name(consts::AGGREGATION_TEMPORALITY)
+            .expect("aggregation_temporality")
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(pt_aggregation.value(0), 0);
+        assert_eq!(pt_aggregation.value(2), 2);
+
+        // profile_id: 16 bytes verbatim, empty → null
+        let profile_id = profiles_col::<FixedSizeBinaryArray>(profiles_rb, consts::PROFILE_ID);
+        assert_eq!(profile_id.value(0), (1..=16).collect::<Vec<u8>>());
+        assert!(profile_id.is_null(1));
+        assert_eq!(profile_id.value(2), (16..=31).collect::<Vec<u8>>());
+
+        // original payload: empty → null
+        let payload_format = profiles_utf8_col(profiles_rb, consts::ORIGINAL_PAYLOAD_FORMAT);
+        assert_eq!(payload_format.value(0), "pprof");
+        assert!(payload_format.is_null(1));
+        let payload = profiles_col::<BinaryArray>(profiles_rb, consts::ORIGINAL_PAYLOAD);
+        assert_eq!(payload.value(0), &[9, 9, 9]);
+        assert!(payload.is_null(1));
+
+        // sample_type list: entries copied verbatim
+        let sample_type = profiles_col::<ListArray>(profiles_rb, consts::SAMPLE_TYPE);
+        assert_eq!(sample_type.value_length(0), 2);
+        assert_eq!(sample_type.value_length(1), 0);
+        assert_eq!(sample_type.value_length(2), 1);
+        let st_row0 = sample_type.value(0);
+        let st_row0 = st_row0.as_any().downcast_ref::<StructArray>().unwrap();
+        let st_types = st_row0
+            .column_by_name(consts::TYPE_STRINDEX)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(st_types.values(), &[7, 8]);
+
+        // index lists copied verbatim
+        assert_eq!(
+            profiles_i32_lists(profiles_rb, consts::LOCATION_INDICES),
+            vec![vec![0, 1, 2], vec![], vec![1]]
+        );
+        assert_eq!(
+            profiles_i32_lists(profiles_rb, consts::COMMENT_STRINDICES),
+            vec![vec![6], vec![], vec![]]
+        );
+        assert_eq!(
+            profiles_i32_lists(profiles_rb, consts::ATTRIBUTE_INDICES),
+            vec![vec![2], vec![], vec![]]
+        );
+
+        // ── the Sample record ───────────────────────────────────────────
+        let sample_rb = otap_batch.get(ArrowPayloadType::Sample).expect("samples");
+        assert_eq!(sample_rb.num_rows(), 4);
+        assert_plain_encoding(sample_rb, consts::PARENT_ID);
+        // samples map to the right profile ids, in traversal order
+        assert_eq!(
+            profiles_col::<UInt16Array>(sample_rb, consts::PARENT_ID).values(),
+            &[0, 0, 1, 2]
+        );
+        assert_eq!(
+            profiles_col::<Int32Array>(sample_rb, consts::LOCATIONS_START_INDEX).values(),
+            &[0, 2, 0, 1]
+        );
+        assert_eq!(
+            profiles_col::<Int32Array>(sample_rb, consts::LOCATIONS_LENGTH).values(),
+            &[2, 1, 0, 1]
+        );
+        // link_index: presence is faithful — Some(0) stays 0, None is null
+        let link_index = profiles_col::<Int32Array>(sample_rb, consts::LINK_INDEX);
+        assert_eq!(link_index.value(0), 1);
+        assert!(link_index.is_null(1));
+        assert_eq!(link_index.value(2), 0);
+        assert!(link_index.is_null(3));
+        let values = profiles_col::<ListArray>(sample_rb, consts::SAMPLE_VALUE);
+        let values_row0 = values.value(0);
+        let values_row0 = values_row0.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(values_row0.values(), &[100, 1]);
+        assert_eq!(values.value_length(2), 0);
+        let timestamps = profiles_col::<ListArray>(sample_rb, consts::TIMESTAMPS_UNIX_NANO);
+        let ts_row0 = timestamps.value(0);
+        let ts_row0 = ts_row0.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(ts_row0.values(), &[111, 222]);
+        assert_eq!(
+            profiles_i32_lists(sample_rb, consts::ATTRIBUTE_INDICES),
+            vec![vec![0, 1], vec![], vec![3], vec![4, 5, 6]]
+        );
+
+        // ── the interned tables: verbatim content, id = row position ────
+        let string_rb = otap_batch
+            .get(ArrowPayloadType::StringTable)
+            .expect("string table");
+        assert_eq!(string_rb.num_rows(), profiles_data.string_table.len());
+        assert_eq!(
+            profiles_col::<UInt32Array>(string_rb, consts::ID).values(),
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8]
+        );
+        let string_values = profiles_utf8_col(string_rb, consts::STRING_TABLE_VALUE);
+        for (i, expected) in profiles_data.string_table.iter().enumerate() {
+            assert!(!string_values.is_null(i), "string {i} should not be null");
+            assert_eq!(string_values.value(i), expected, "string table row {i}");
+        }
+
+        let function_rb = otap_batch
+            .get(ArrowPayloadType::FunctionTable)
+            .expect("function table");
+        assert_eq!(function_rb.num_rows(), profiles_data.function_table.len());
+        assert_eq!(
+            profiles_col::<UInt32Array>(function_rb, consts::ID).values(),
+            &[0, 1, 2]
+        );
+        assert_eq!(
+            profiles_col::<Int32Array>(function_rb, consts::NAME_STRINDEX).values(),
+            &[3, 1, 8]
+        );
+        assert_eq!(
+            profiles_col::<Int32Array>(function_rb, consts::SYSTEM_NAME_STRINDEX).values(),
+            &[3, 0, 1]
+        );
+        assert_eq!(
+            profiles_col::<Int32Array>(function_rb, consts::FILENAME_STRINDEX).values(),
+            &[5, 0, 5]
+        );
+        assert_eq!(
+            profiles_col::<Int64Array>(function_rb, consts::START_LINE).values(),
+            &[10, 0, 42]
+        );
+
+        let mapping_rb = otap_batch
+            .get(ArrowPayloadType::MappingTable)
+            .expect("mapping table");
+        assert_eq!(mapping_rb.num_rows(), profiles_data.mapping_table.len());
+        assert_eq!(
+            profiles_col::<UInt32Array>(mapping_rb, consts::ID).values(),
+            &[0, 1]
+        );
+        assert_eq!(
+            profiles_col::<UInt64Array>(mapping_rb, consts::MEMORY_START).values(),
+            &[0x1000, 0]
+        );
+        assert_eq!(
+            profiles_col::<UInt64Array>(mapping_rb, consts::FILE_OFFSET).values(),
+            &[77, 0]
+        );
+        let has_functions = profiles_col::<BooleanArray>(mapping_rb, consts::HAS_FUNCTIONS);
+        assert!(has_functions.value(0));
+        assert!(!has_functions.value(1));
+        // all-false boolean columns are omitted (losslessly: absent decodes
+        // back to the proto default `false`)
+        assert!(
+            mapping_rb.column_by_name(consts::HAS_FILENAMES).is_none(),
+            "all-false has_filenames column should be omitted"
+        );
+        assert_eq!(
+            profiles_i32_lists(mapping_rb, consts::ATTRIBUTE_INDICES),
+            vec![vec![0], vec![]]
+        );
+
+        let location_rb = otap_batch
+            .get(ArrowPayloadType::LocationTable)
+            .expect("location table");
+        assert_eq!(location_rb.num_rows(), profiles_data.location_table.len());
+        assert_eq!(
+            profiles_col::<UInt32Array>(location_rb, consts::ID).values(),
+            &[0, 1, 2]
+        );
+        // mapping_index: presence is faithful — Some stays, None is null
+        let mapping_index = profiles_col::<Int32Array>(location_rb, consts::MAPPING_INDEX);
+        assert_eq!(mapping_index.value(0), 0);
+        assert!(mapping_index.is_null(1));
+        assert_eq!(mapping_index.value(2), 1);
+        assert_eq!(
+            profiles_col::<UInt64Array>(location_rb, consts::ADDRESS).values(),
+            &[0x1234, 0, 0x999]
+        );
+        let is_folded = profiles_col::<BooleanArray>(location_rb, consts::IS_FOLDED);
+        assert!(!is_folded.value(0));
+        assert!(is_folded.value(1));
+        // location lines: List<Struct{function_index, line, column}> verbatim
+        let lines = profiles_col::<ListArray>(location_rb, consts::LINE);
+        assert_eq!(lines.value_length(0), 2);
+        assert_eq!(lines.value_length(1), 0);
+        assert_eq!(lines.value_length(2), 1);
+        let lines_row0 = lines.value(0);
+        let lines_row0 = lines_row0.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(
+            lines_row0
+                .column_by_name(consts::FUNCTION_INDEX)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .values(),
+            &[0, 2]
+        );
+        assert_eq!(
+            lines_row0
+                .column_by_name(consts::LINE)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[10, 20]
+        );
+
+        let link_rb = otap_batch
+            .get(ArrowPayloadType::LinkTable)
+            .expect("link table");
+        assert_eq!(link_rb.num_rows(), profiles_data.link_table.len());
+        assert_eq!(
+            profiles_col::<UInt32Array>(link_rb, consts::ID).values(),
+            &[0, 1]
+        );
+        let trace_id = profiles_col::<FixedSizeBinaryArray>(link_rb, consts::TRACE_ID);
+        assert_eq!(trace_id.value(0), (1..=16).collect::<Vec<u8>>());
+        assert!(trace_id.is_null(1), "empty trace_id should encode as null");
+        let span_id = profiles_col::<FixedSizeBinaryArray>(link_rb, consts::SPAN_ID);
+        assert_eq!(span_id.value(0), (1..=8).collect::<Vec<u8>>());
+        assert_eq!(span_id.value(1), (9..=16).collect::<Vec<u8>>());
+
+        let attrs_rb = otap_batch
+            .get(ArrowPayloadType::AttributeTable)
+            .expect("attribute table");
+        assert_eq!(attrs_rb.num_rows(), profiles_data.attribute_table.len());
+        assert_eq!(
+            profiles_col::<UInt32Array>(attrs_rb, consts::ID).values(),
+            &[0, 1, 2, 3, 4, 5, 6]
+        );
+        let attr_keys = profiles_utf8_col(attrs_rb, consts::ATTRIBUTE_KEY);
+        let expected_keys: Vec<&str> = profiles_data
+            .attribute_table
+            .iter()
+            .map(|kv| kv.key.as_str())
+            .collect();
+        let actual_keys: Vec<&str> = (0..attr_keys.len()).map(|i| attr_keys.value(i)).collect();
+        assert_eq!(actual_keys, expected_keys);
+        let attr_types = profiles_col::<UInt8Array>(attrs_rb, consts::ATTRIBUTE_TYPE);
+        assert_eq!(
+            attr_types.values(),
+            &[
+                AttributeValueType::Str as u8,
+                AttributeValueType::Int as u8,
+                AttributeValueType::Double as u8,
+                AttributeValueType::Bool as u8,
+                AttributeValueType::Bytes as u8,
+                AttributeValueType::Map as u8,
+                AttributeValueType::Slice as u8,
+            ]
+        );
+        let attr_str = profiles_cast_col(attrs_rb, consts::ATTRIBUTE_STR, &DataType::Utf8);
+        let attr_str = attr_str.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(attr_str.value(0), "main");
+        assert!(attr_str.is_null(1));
+        let attr_int = profiles_cast_col(attrs_rb, consts::ATTRIBUTE_INT, &DataType::Int64);
+        let attr_int = attr_int.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(attr_int.value(1), 3);
+        let attr_double = profiles_col::<Float64Array>(attrs_rb, consts::ATTRIBUTE_DOUBLE);
+        assert_eq!(attr_double.value(2), 0.5);
+        let attr_bool = profiles_col::<BooleanArray>(attrs_rb, consts::ATTRIBUTE_BOOL);
+        assert!(attr_bool.value(3));
+        let attr_bytes = profiles_cast_col(attrs_rb, consts::ATTRIBUTE_BYTES, &DataType::Binary);
+        let attr_bytes = attr_bytes.as_any().downcast_ref::<BinaryArray>().unwrap();
+        assert_eq!(attr_bytes.value(4), &[1, 2, 3]);
+        // Map and Array values land in the CBOR ser lane
+        let attr_ser = profiles_cast_col(attrs_rb, consts::ATTRIBUTE_SER, &DataType::Binary);
+        let attr_ser = attr_ser.as_any().downcast_ref::<BinaryArray>().unwrap();
+        assert!(attr_ser.is_null(0));
+        assert!(!attr_ser.is_null(5), "Map value should fill the ser lane");
+        assert!(!attr_ser.is_null(6), "Array value should fill the ser lane");
+
+        let units_rb = otap_batch
+            .get(ArrowPayloadType::AttributeUnits)
+            .expect("attribute units");
+        assert_eq!(units_rb.num_rows(), profiles_data.attribute_units.len());
+        assert_eq!(
+            profiles_col::<UInt32Array>(units_rb, consts::ID).values(),
+            &[0, 1]
+        );
+        assert_eq!(
+            profiles_col::<Int32Array>(units_rb, consts::ATTRIBUTE_KEY_STRINDEX).values(),
+            &[1, 7]
+        );
+        assert_eq!(
+            profiles_col::<Int32Array>(units_rb, consts::UNIT_STRINDEX).values(),
+            &[2, 8]
+        );
+
+        // resource/scope attrs side tables, keyed by resource/scope id
+        let resource_attrs_rb = otap_batch
+            .get(ArrowPayloadType::ResourceAttrs)
+            .expect("resource attrs");
+        assert_eq!(resource_attrs_rb.num_rows(), 2);
+        assert_eq!(
+            profiles_col::<UInt16Array>(resource_attrs_rb, consts::PARENT_ID).values(),
+            &[0, 0]
+        );
+        let scope_attrs_rb = otap_batch
+            .get(ArrowPayloadType::ScopeAttrs)
+            .expect("scope attrs");
+        assert_eq!(scope_attrs_rb.num_rows(), 1);
+        assert_eq!(
+            profiles_col::<UInt16Array>(scope_attrs_rb, consts::PARENT_ID).values(),
+            &[0]
+        );
+
+        // ── index integrity: every reference is within its table ────────
+        // references into the string table
+        assert_i32_col_in_bounds(function_rb, consts::NAME_STRINDEX, n_strings);
+        assert_i32_col_in_bounds(function_rb, consts::SYSTEM_NAME_STRINDEX, n_strings);
+        assert_i32_col_in_bounds(function_rb, consts::FILENAME_STRINDEX, n_strings);
+        assert_i32_col_in_bounds(mapping_rb, consts::FILENAME_STRINDEX, n_strings);
+        assert_i32_col_in_bounds(units_rb, consts::ATTRIBUTE_KEY_STRINDEX, n_strings);
+        assert_i32_col_in_bounds(units_rb, consts::UNIT_STRINDEX, n_strings);
+        assert_i32_lists_in_bounds(profiles_rb, consts::COMMENT_STRINDICES, n_strings);
+        // references into the location table
+        assert_i32_lists_in_bounds(profiles_rb, consts::LOCATION_INDICES, n_locations);
+        // references into the attribute table
+        assert_i32_lists_in_bounds(profiles_rb, consts::ATTRIBUTE_INDICES, n_attrs);
+        assert_i32_lists_in_bounds(sample_rb, consts::ATTRIBUTE_INDICES, n_attrs);
+        assert_i32_lists_in_bounds(mapping_rb, consts::ATTRIBUTE_INDICES, n_attrs);
+        assert_i32_lists_in_bounds(location_rb, consts::ATTRIBUTE_INDICES, n_attrs);
+        // references into the mapping / link / function tables
+        assert_i32_col_in_bounds(location_rb, consts::MAPPING_INDEX, n_mappings);
+        assert_i32_col_in_bounds(sample_rb, consts::LINK_INDEX, n_links);
+        // sample_type strindexes + line function indexes
+        for i in 0..sample_type.len() {
+            let row = sample_type.value(i);
+            let row = row.as_any().downcast_ref::<StructArray>().unwrap();
+            for col_name in [consts::TYPE_STRINDEX, consts::UNIT_STRINDEX] {
+                let col = row
+                    .column_by_name(col_name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap();
+                for val in col.iter().flatten() {
+                    assert!((0..n_strings).contains(&val));
+                }
+            }
+        }
+        for i in 0..lines.len() {
+            let row = lines.value(i);
+            let row = row.as_any().downcast_ref::<StructArray>().unwrap();
+            let col = row
+                .column_by_name(consts::FUNCTION_INDEX)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            for val in col.iter().flatten() {
+                assert!((0..n_functions).contains(&val));
+            }
+        }
+    }
+
+    #[test]
+    fn test_encode_profiles_empty() {
+        let otap_batch = encode_profiles_otap_batch(&ProfilesData::default()).unwrap();
+        assert!(matches!(otap_batch, OtapArrowRecords::Profiles(_)));
+        for payload_type in otap_batch.allowed_payload_types() {
+            assert!(
+                otap_batch.get(*payload_type).is_none(),
+                "expected no {payload_type:?} batch for empty input"
+            );
+        }
+    }
+
+    #[test]
+    fn test_profiles_producer_round_trip() {
+        use crate::Consumer;
+        use crate::encode::producer::Producer;
+        use crate::otap::{Profiles as ProfilesStore, from_record_messages};
+
+        let profiles_data = _generate_profiles_data_full();
+        let mut input = encode_profiles_otap_batch(&profiles_data).unwrap();
+
+        // keep the plain (pre-transport) sample columns for comparison after decode
+        let plain_sample_rb = input
+            .get(ArrowPayloadType::Sample)
+            .expect("samples")
+            .clone();
+
+        let mut producer = Producer::new();
+        let mut consumer = Consumer::default();
+
+        // produce_bar applies the transport-optimized encodings in place, so
+        // after this call `input` and the consumed result are both encoded
+        let mut bar = producer.produce_bar(&mut input).unwrap();
+        let mut result = OtapArrowRecords::Profiles(
+            from_record_messages::<ProfilesStore>(consumer.consume_bar(&mut bar).unwrap()).unwrap(),
+        );
+        assert_eq!(input, result);
+
+        // decoding the transport-optimized ids must restore the plain
+        // sample -> profile join exactly
+        result.decode_transport_optimized_ids().unwrap();
+        let decoded_sample_rb = result.get(ArrowPayloadType::Sample).expect("samples");
+        assert_eq!(
+            profiles_col::<UInt16Array>(decoded_sample_rb, consts::PARENT_ID).values(),
+            profiles_col::<UInt16Array>(&plain_sample_rb, consts::PARENT_ID).values()
+        );
+        assert_eq!(
+            profiles_col::<Int32Array>(decoded_sample_rb, consts::LOCATIONS_START_INDEX).values(),
+            profiles_col::<Int32Array>(&plain_sample_rb, consts::LOCATIONS_START_INDEX).values()
+        );
+    }
+
+    #[test]
+    fn test_otlp_bytes_to_otap_profiles() {
+        use crate::{OtapPayload, OtlpProtoBytes, TryIntoWithOptions};
+        use bytes::Bytes;
+
+        // `ProfilesData` is wire-compatible with `ExportProfilesServiceRequest`
+        // (field 1 is `resource_profiles` in both), so serialized `ProfilesData`
+        // bytes — including the dictionary table fields that only exist on
+        // `ProfilesData` — must convert losslessly through the bytes payload.
+        let profiles_data = _generate_profiles_data_full();
+        let mut bytes = vec![];
+        profiles_data.encode(&mut bytes).unwrap();
+
+        let payload: OtapPayload = OtlpProtoBytes::ExportProfilesRequest(Bytes::from(bytes)).into();
+        let otap_batch: OtapArrowRecords = payload.try_into_with_default().unwrap();
+        assert!(matches!(otap_batch, OtapArrowRecords::Profiles(_)));
+
+        let expected = encode_profiles_otap_batch(&profiles_data).unwrap();
+        assert_eq!(otap_batch, expected);
     }
 
     /// I'm a small helper function for examining differences between expected and under-test

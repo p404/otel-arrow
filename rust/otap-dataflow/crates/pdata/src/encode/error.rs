@@ -29,6 +29,13 @@ pub enum Error {
     #[error("An error occurred packing more than 2**32 - 1 entries into a record batch")]
     U32OverflowError,
 
+    /// Error decoding the OTLP protobuf bytes that were passed as the encode input
+    #[error("An error occurred decoding OTLP proto bytes: {error}")]
+    ProtoDecodeError {
+        /// The error that occurred
+        error: String,
+    },
+
     /// Error propagated from the OTAP pdata layer (e.g. schema validation).
     #[error(transparent)]
     OtapError(#[from] crate::error::Error),

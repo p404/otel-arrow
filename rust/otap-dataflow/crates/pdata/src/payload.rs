@@ -82,7 +82,10 @@
 // directly from OTAP -> OTLP bytes. The utility functions we use might change as part of
 // this diagram may need to be updated (https://github.com/open-telemetry/otel-arrow/issues/1095)
 
-use crate::encode::{encode_logs_otap_batch, encode_metrics_otap_batch, encode_spans_otap_batch};
+use crate::encode::{
+    encode_logs_otap_batch, encode_metrics_otap_batch, encode_profiles_otap_batch,
+    encode_spans_otap_batch,
+};
 use crate::error::Error;
 use crate::otap::{OtapArrowRecords, OtapBatchStore};
 use crate::otlp::logs::LogsProtoBytesEncoder;
@@ -458,10 +461,25 @@ impl TryFromWithOptions<OtlpProtoBytes> for OtapArrowRecords {
 
                 Ok(otap_batch)
             }
-            OtlpProtoBytes::ExportProfilesRequest(_) => Err(Error::ProfilesNotImplemented {
-                feature: "OTLP proto -> OTAP profiles decode",
+            OtlpProtoBytes::ExportProfilesRequest(bytes) => {
+                // There is no OTLP-bytes view for profiles yet (unlike the
+                // other signals above, which parse the proto bytes lazily),
+                // so decode the request with prost and encode from the
+                // proto-struct view. `ProfilesData` is wire-compatible with
+                // `ExportProfilesServiceRequest`: field 1 is
+                // `resource_profiles` in both, and the dictionary table
+                // fields (2..=8) only exist in `ProfilesData`, so decoding
+                // request bytes this way is lossless.
+                use crate::proto::opentelemetry::profiles::v1development::ProfilesData;
+                let profiles_data = ProfilesData::decode(bytes.as_ref()).map_err(|e| {
+                    crate::encode::Error::ProtoDecodeError {
+                        error: e.to_string(),
+                    }
+                })?;
+                let otap_batch = encode_profiles_otap_batch(&profiles_data)?;
+
+                Ok(otap_batch)
             }
-            .into()),
         }
     }
 }

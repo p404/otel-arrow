@@ -8,6 +8,7 @@
 pub mod attributes;
 pub mod logs;
 pub mod metrics;
+pub mod profiles;
 pub mod traces;
 
 #[allow(missing_docs, clippy::len_without_is_empty, clippy::must_use_candidate)]
