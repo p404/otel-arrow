@@ -26,6 +26,8 @@ pub mod common;
 pub mod logs;
 /// Common methods for OTLP/OTAP metrics.
 pub mod metrics;
+/// Common methods for OTLP/OTAP profiles.
+pub mod profiles;
 /// Common methods for OTLP/OTAP traces.
 pub mod traces;
 

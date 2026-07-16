@@ -90,6 +90,7 @@ use crate::error::Error;
 use crate::otap::{OtapArrowRecords, OtapBatchStore};
 use crate::otlp::logs::LogsProtoBytesEncoder;
 use crate::otlp::metrics::MetricsProtoBytesEncoder;
+use crate::otlp::profiles::ProfilesProtoBytesEncoder;
 use crate::otlp::traces::TracesProtoBytesEncoder;
 use crate::otlp::{OtlpProtoBytes, ProtoBuffer, ProtoBytesEncoder};
 use crate::proto::OtlpProtoMessage;
@@ -348,9 +349,9 @@ impl OtapPayloadHelpers for OtlpProtoBytes {
                     .sum()
             }
             // TODO(profiles): there is no `otap_df_pdata_views` OTLP-bytes view
-            // for profiles yet (see `Error::ProfilesNotImplemented`), so we
-            // can't cheaply count samples without full proto deserialization.
-            // Revisit once the profiles OTLP-bytes view lands.
+            // for profiles yet, so we can't cheaply count samples without full
+            // proto deserialization. Revisit once the profiles OTLP-bytes view
+            // lands.
             Self::ExportProfilesRequest(_) => 0,
         }
     }
@@ -428,9 +429,21 @@ impl TryFromWithOptions<OtapArrowRecords> for OtlpProtoBytes {
                 traces_encoder.encode(&mut value, &mut buffer)?;
                 Ok(Self::ExportTracesRequest(buffer.into_bytes()))
             }
-            OtapArrowRecords::Profiles(_) => Err(Error::ProfilesNotImplemented {
-                feature: "OTAP profiles -> OTLP proto encode",
-            }),
+            OtapArrowRecords::Profiles(_) => {
+                // Note: the emitted bytes are a serialized `ProfilesData`
+                // message, which is wire-compatible with
+                // `ExportProfilesServiceRequest` on field 1
+                // (`resource_profiles`) and additionally carries the
+                // dictionary tables (fields 2..=8) that the request message
+                // of the pinned v1development proto lacks. The reverse
+                // conversion below decodes `ExportProfilesRequest` bytes as
+                // `ProfilesData` for the same reason, which is what makes
+                // this round trip lossless. See `crate::otlp::profiles`.
+                let mut profiles_encoder = ProfilesProtoBytesEncoder::new();
+                let mut buffer = ProtoBuffer::new(opts);
+                profiles_encoder.encode(&mut value, &mut buffer)?;
+                Ok(Self::ExportProfilesRequest(buffer.into_bytes()))
+            }
         }
     }
 }

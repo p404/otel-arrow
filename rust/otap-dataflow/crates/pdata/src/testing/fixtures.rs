@@ -7,13 +7,19 @@
 //! in OTLP telemetry data, including empty resources, scopes, attributes,
 //! and other optional field combinations.
 
-use crate::proto::opentelemetry::common::v1::{AnyValue, InstrumentationScope, KeyValue};
+use crate::proto::opentelemetry::common::v1::{
+    AnyValue, ArrayValue, InstrumentationScope, KeyValue, KeyValueList, any_value,
+};
 use crate::proto::opentelemetry::logs::v1::{
     LogRecord, LogsData, ResourceLogs, ScopeLogs, SeverityNumber,
 };
 use crate::proto::opentelemetry::metrics::v1::{
     AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, MetricsData,
     NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint,
+};
+use crate::proto::opentelemetry::profiles::v1development::{
+    AttributeUnit, Function, Line, Link as ProfilesLink, Location, Mapping, Profile, ProfilesData,
+    ResourceProfiles, Sample as ProfilesSample, ScopeProfiles, ValueType as ProfilesValueType,
 };
 use crate::proto::opentelemetry::resource::v1::Resource;
 use crate::proto::opentelemetry::trace::v1::{
@@ -1667,6 +1673,386 @@ impl DataGenerator {
                 builder.finish()
             })
             .collect()
+    }
+}
+
+//
+// Profiles Fixtures
+//
+
+/// Build a small but full-fidelity `ProfilesData`: every proto field of every
+/// profiles message is exercised by at least one fixture element, including
+/// the presence-sensitive edge cases the OTAP round trip must preserve
+/// byte-for-byte.
+///
+/// Field coverage table (message.field -> exercising fixture element):
+///
+/// | proto field                          | exercised by                                          |
+/// |--------------------------------------|-------------------------------------------------------|
+/// | ResourceProfiles.resource            | tree 0 `Some(resource)`; tree 1 `None` (resource-less) |
+/// | ResourceProfiles.scope_profiles      | both trees                                            |
+/// | ResourceProfiles.schema_url          | tree 0 non-empty; tree 1 `""`                         |
+/// | ScopeProfiles.scope                  | tree 0 `Some(scope)`; tree 1 `None` (scope-less)      |
+/// | ScopeProfiles.profiles               | profile0+profile1 (same scope); profile2              |
+/// | ScopeProfiles.schema_url             | tree 0 non-empty; tree 1 `""`                         |
+/// | Profile.sample_type                  | profile0 two entries; profile1 empty; profile2 one    |
+/// | Profile.sample                       | 2 / 1 / 1 samples per profile                         |
+/// | Profile.location_indices             | `[0,1,2]` / `[]` / `[1]`                              |
+/// | Profile.time_nanos                   | non-zero / `0` / non-zero                             |
+/// | Profile.duration_nanos               | `5_000` / `0` / `1`                                   |
+/// | Profile.period_type                  | `Some` / `None` / `Some` (presence pin)               |
+/// | Profile.period                       | `10_000` / `0` / `1`                                  |
+/// | Profile.comment_strindices           | `[6]` / `[]` / `[]`                                   |
+/// | Profile.default_sample_type_index    | `1` / `0` / `0`                                       |
+/// | Profile.profile_id                   | 16 bytes / EMPTY (proto default) / 16 bytes           |
+/// | Profile.dropped_attributes_count     | `3` / `0` / `0`                                       |
+/// | Profile.original_payload_format      | `"pprof"` / `""`                                      |
+/// | Profile.original_payload             | `[9,9,9]` / empty                                     |
+/// | Profile.attribute_indices            | `[2]` / `[]`                                          |
+/// | Sample.locations_start_index         | `0` / `2` / `0` / `1`                                 |
+/// | Sample.locations_length              | `2` / `1` / `0` / `1`                                 |
+/// | Sample.value                         | `[100,1]` / `[200,2]` / `[]` / `[300]`                |
+/// | Sample.attribute_indices             | `[0,1]` / `[]` / `[3]` / `[4,5,6]`                    |
+/// | Sample.link_index                    | `Some(1)` / `None` / `Some(0)` (presence pin) / `None`|
+/// | Sample.timestamps_unix_nano          | `[111,222]` / `[]` / `[333]` / `[]`                   |
+/// | Mapping.* (all fields)               | mapping0 all non-default; mapping1 all default        |
+/// | Location.mapping_index               | `Some(0)` / `None` / `Some(1)` (presence pin)         |
+/// | Location.address                     | `0x1234` / `0` / `0x999`                              |
+/// | Location.line                        | 2 / 0 / 1 entries                                     |
+/// | Location.is_folded                   | `false` / `true` / `false`                            |
+/// | Location.attribute_indices           | `[1]` / `[]`                                          |
+/// | Line.function_index / line / column  | `(0,10,2)`, `(2,20,0)`, `(1,7,1)` (zeros included)    |
+/// | Function.* (all four fields)         | three entries incl. strindex `0` and start_line `0`   |
+/// | Link.trace_id                        | 16 bytes / EMPTY / ALL-ZERO 16 bytes                  |
+/// | Link.span_id                         | 8 bytes / 8 bytes / EMPTY                             |
+/// | ValueType.type_/unit_strindex        | `7,8,1` / `2`                                         |
+/// | ValueType.aggregation_temporality    | all three enum values (`0`, `1`, `2`)                 |
+/// | AttributeUnit.attribute_key_strindex | `1`, `7`, `0` (all-default row)                       |
+/// | AttributeUnit.unit_strindex          | `2`, `8`, `0` (all-default row)                       |
+/// | string_table                         | 9 entries incl. the conventional `""` at index 0      |
+/// | attribute_table AnyValue variants    | Str, Int(3), Double, Bool(true), Bytes, Kvlist (CBOR  |
+/// |                                      | `ser` lane), Array (CBOR `ser` lane), Int(0) — the    |
+/// |                                      | exactly-zero int pins default-elision round-tripping  |
+/// | Resource.attributes / dropped        | tree 0: two attrs + dropped=1                         |
+/// | Scope.name/version/attrs/dropped     | tree 0: all set; Int(0) attr pins the absent-int-lane |
+/// |                                      | case (the scope attrs batch has no other int values)  |
+///
+/// Known not-representable cases (deliberately NOT in the fixture):
+/// `Some(Resource::default())`/`Some(InstrumentationScope::default())`
+/// canonicalize to `None` (OTAP has no presence bit), attribute
+/// `AnyValue { value: None }` canonicalizes to the empty `AnyValue`, and
+/// `AnyValue::new_bool(false)` is subject to the pre-existing shared bool
+/// default-handling issue (opentelemetry/otel-arrow#1449).
+///
+/// Note: the attribute *order* inside resource/scope attributes is chosen to
+/// be invariant under the transport-optimization sort
+/// (`type, key, value..., parent_id`) so that the fixture also round-trips
+/// byte-identically through the Producer/Consumer wire path.
+#[must_use]
+pub fn profiles_data_full_fidelity() -> ProfilesData {
+    let sample0 = ProfilesSample {
+        locations_start_index: 0,
+        locations_length: 2,
+        value: vec![100, 1],
+        attribute_indices: vec![0, 1],
+        link_index: Some(1),
+        timestamps_unix_nano: vec![111, 222],
+    };
+    let sample1 = ProfilesSample {
+        locations_start_index: 2,
+        locations_length: 1,
+        value: vec![200, 2],
+        attribute_indices: vec![],
+        link_index: None,
+        timestamps_unix_nano: vec![],
+    };
+    // `Some(0)` pins optional-field presence: link table row 0 is a valid
+    // reference and must not be conflated with "not present"
+    let sample2 = ProfilesSample {
+        locations_start_index: 0,
+        locations_length: 0,
+        value: vec![],
+        attribute_indices: vec![3],
+        link_index: Some(0),
+        timestamps_unix_nano: vec![333],
+    };
+    let sample3 = ProfilesSample {
+        locations_start_index: 1,
+        locations_length: 1,
+        value: vec![300],
+        attribute_indices: vec![4, 5, 6],
+        link_index: None,
+        timestamps_unix_nano: vec![],
+    };
+
+    let profile0 = Profile {
+        sample_type: vec![
+            ProfilesValueType {
+                type_strindex: 7,
+                unit_strindex: 2,
+                aggregation_temporality: 1,
+            },
+            ProfilesValueType {
+                type_strindex: 8,
+                unit_strindex: 2,
+                aggregation_temporality: 2,
+            },
+        ],
+        sample: vec![sample0, sample1],
+        location_indices: vec![0, 1, 2],
+        time_nanos: 1_000_000_000,
+        duration_nanos: 5_000,
+        period_type: Some(ProfilesValueType {
+            type_strindex: 1,
+            unit_strindex: 2,
+            aggregation_temporality: 0,
+        }),
+        period: 10_000,
+        comment_strindices: vec![6],
+        default_sample_type_index: 1,
+        profile_id: (1..=16).collect(),
+        dropped_attributes_count: 3,
+        original_payload_format: "pprof".to_string(),
+        original_payload: vec![9, 9, 9],
+        attribute_indices: vec![2],
+    };
+    // profile with an EMPTY profile_id (proto default) — must encode as null
+    let profile1 = Profile {
+        sample_type: vec![],
+        sample: vec![sample2],
+        location_indices: vec![],
+        time_nanos: 0,
+        duration_nanos: 0,
+        period_type: None,
+        period: 0,
+        comment_strindices: vec![],
+        default_sample_type_index: 0,
+        profile_id: vec![],
+        dropped_attributes_count: 0,
+        original_payload_format: String::new(),
+        original_payload: vec![],
+        attribute_indices: vec![],
+    };
+    let profile2 = Profile {
+        sample_type: vec![ProfilesValueType {
+            type_strindex: 7,
+            unit_strindex: 2,
+            aggregation_temporality: 1,
+        }],
+        sample: vec![sample3],
+        location_indices: vec![1],
+        time_nanos: 2_000_000_000,
+        duration_nanos: 1,
+        period_type: Some(ProfilesValueType {
+            type_strindex: 1,
+            unit_strindex: 2,
+            aggregation_temporality: 2,
+        }),
+        period: 1,
+        comment_strindices: vec![],
+        default_sample_type_index: 0,
+        profile_id: (16..=31).collect(),
+        dropped_attributes_count: 0,
+        original_payload_format: String::new(),
+        original_payload: vec![],
+        attribute_indices: vec![],
+    };
+
+    ProfilesData {
+        resource_profiles: vec![
+            ResourceProfiles {
+                resource: Some(
+                    Resource::build()
+                        .attributes(vec![
+                            KeyValue::new("res.attr", AnyValue::new_string("host1")),
+                            KeyValue::new("res.num", AnyValue::new_int(42)),
+                        ])
+                        .dropped_attributes_count(1u32)
+                        .finish(),
+                ),
+                scope_profiles: vec![ScopeProfiles {
+                    scope: Some(
+                        InstrumentationScope::build()
+                            .name("profiler")
+                            .version("1.0")
+                            .attributes(vec![
+                                // the ONLY int-valued attribute of the scope
+                                // attrs batch is exactly 0, which pins the
+                                // "absent int lane + type=Int decodes to 0"
+                                // contract; it is ordered before the bool so
+                                // the transport sort (by value type) keeps
+                                // the original order
+                                KeyValue::new("scope.zero", AnyValue::new_int(0)),
+                                KeyValue::new("scope.attr", AnyValue::new_bool(true)),
+                            ])
+                            .dropped_attributes_count(2u32)
+                            .finish(),
+                    ),
+                    profiles: vec![profile0, profile1],
+                    schema_url: "https://scope.schema".to_string(),
+                }],
+                schema_url: "https://resource.schema".to_string(),
+            },
+            // resource/scope entirely unknown for the second tree
+            ResourceProfiles {
+                resource: None,
+                scope_profiles: vec![ScopeProfiles {
+                    scope: None,
+                    profiles: vec![profile2],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            },
+        ],
+        mapping_table: vec![
+            Mapping {
+                memory_start: 0x1000,
+                memory_limit: 0x2000,
+                file_offset: 77,
+                filename_strindex: 4,
+                attribute_indices: vec![0],
+                has_functions: true,
+                has_filenames: false,
+                has_line_numbers: true,
+                has_inline_frames: false,
+            },
+            Mapping::default(),
+        ],
+        location_table: vec![
+            Location {
+                mapping_index: Some(0),
+                address: 0x1234,
+                line: vec![
+                    Line {
+                        function_index: 0,
+                        line: 10,
+                        column: 2,
+                    },
+                    Line {
+                        function_index: 2,
+                        line: 20,
+                        column: 0,
+                    },
+                ],
+                is_folded: false,
+                attribute_indices: vec![1],
+            },
+            // `mapping_index` not present — must encode as null, distinct
+            // from `Some(0)` in row 0
+            Location {
+                mapping_index: None,
+                address: 0,
+                line: vec![],
+                is_folded: true,
+                attribute_indices: vec![],
+            },
+            Location {
+                mapping_index: Some(1),
+                address: 0x999,
+                line: vec![Line {
+                    function_index: 1,
+                    line: 7,
+                    column: 1,
+                }],
+                is_folded: false,
+                attribute_indices: vec![],
+            },
+        ],
+        function_table: vec![
+            Function {
+                name_strindex: 3,
+                system_name_strindex: 3,
+                filename_strindex: 5,
+                start_line: 10,
+            },
+            Function {
+                name_strindex: 1,
+                system_name_strindex: 0,
+                filename_strindex: 0,
+                start_line: 0,
+            },
+            Function {
+                name_strindex: 8,
+                system_name_strindex: 1,
+                filename_strindex: 5,
+                start_line: 42,
+            },
+        ],
+        link_table: vec![
+            ProfilesLink {
+                trace_id: (1..=16).collect(),
+                span_id: (1..=8).collect(),
+            },
+            // link with an EMPTY trace_id (proto default) — must encode as null
+            ProfilesLink {
+                trace_id: vec![],
+                span_id: (9..=16).collect(),
+            },
+            // ALL-ZERO but well-formed 16-byte trace_id — must survive
+            // verbatim (never conflated with "absent"); the EMPTY span_id
+            // must round-trip back to empty bytes
+            ProfilesLink {
+                trace_id: vec![0; 16],
+                span_id: vec![],
+            },
+        ],
+        string_table: vec![
+            // by convention the string table starts with the empty string
+            "".to_string(),
+            "cpu".to_string(),
+            "nanoseconds".to_string(),
+            "main".to_string(),
+            "libc.so".to_string(),
+            "src/main.rs".to_string(),
+            "a comment".to_string(),
+            "samples".to_string(),
+            "count".to_string(),
+        ],
+        attribute_table: vec![
+            KeyValue::new("thread.name", AnyValue::new_string("main")),
+            KeyValue::new("cpu.core", AnyValue::new_int(3)),
+            KeyValue::new("fraction", AnyValue::new_double(0.5)),
+            KeyValue::new("flag", AnyValue::new_bool(true)),
+            KeyValue::new("blob", AnyValue::new_bytes([1u8, 2, 3])),
+            // Map value — exercises the CBOR `ser` lane
+            KeyValue::new(
+                "ctx",
+                AnyValue {
+                    value: Some(any_value::Value::KvlistValue(KeyValueList {
+                        values: vec![KeyValue::new("inner", AnyValue::new_int(5))],
+                    })),
+                },
+            ),
+            // Array value — also serialized into the `ser` lane
+            KeyValue::new(
+                "arr",
+                AnyValue {
+                    value: Some(any_value::Value::ArrayValue(ArrayValue {
+                        values: vec![AnyValue::new_int(1), AnyValue::new_string("x")],
+                    })),
+                },
+            ),
+            // an int value of exactly 0 (the proto default): the value lane
+            // elides it to null on encode and the decode must restore 0
+            KeyValue::new("cpu.idle", AnyValue::new_int(0)),
+        ],
+        attribute_units: vec![
+            AttributeUnit {
+                attribute_key_strindex: 1,
+                unit_strindex: 2,
+            },
+            AttributeUnit {
+                attribute_key_strindex: 7,
+                unit_strindex: 8,
+            },
+            // an all-default row: strindex 0 is a valid reference (the
+            // conventional "" entry) and must round-trip through the
+            // default-eliding int columns
+            AttributeUnit {
+                attribute_key_strindex: 0,
+                unit_strindex: 0,
+            },
+        ],
     }
 }
 

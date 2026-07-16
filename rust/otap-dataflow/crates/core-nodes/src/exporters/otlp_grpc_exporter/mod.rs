@@ -385,15 +385,16 @@ impl Exporter<OtapPdata> for OTLPExporter {
                             .await;
                         }
                         (SignalType::Profiles, OtapPayload::OtapArrowRecords(otap_batch)) => {
-                            // No `ProfilesProtoBytesEncoder` exists yet (OTAP
-                            // profiles -> OTLP proto encode is not implemented),
-                            // so this batch cannot be converted to an OTLP
-                            // export request. Nack it clearly rather than
-                            // silently dropping it or panicking.
+                            // OTAP profiles -> OTLP proto encoding now exists
+                            // (`otap_df_pdata::otlp::profiles::ProfilesProtoBytesEncoder`),
+                            // but this exporter has no profiles export path
+                            // (client/channel) wired up yet. Nack the batch
+                            // clearly rather than silently dropping it or
+                            // panicking.
                             self.pdata_metrics.inc_failed(SignalType::Profiles);
                             effect_handler
                                 .notify_nack(NackMsg::new_permanent(
-                                    "profiles OTAP -> OTLP proto encoding is not yet implemented",
+                                    "profiles export is not yet wired in the OTLP gRPC exporter",
                                     OtapPdata::new(
                                         context,
                                         OtapPayload::OtapArrowRecords(otap_batch),

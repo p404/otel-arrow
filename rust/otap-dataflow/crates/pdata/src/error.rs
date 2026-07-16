@@ -249,6 +249,16 @@ pub enum Error {
 
     #[error("{feature} is not yet implemented for the profiles signal")]
     ProfilesNotImplemented { feature: &'static str },
+
+    #[error(
+        "profiles column {column}: index {index} is out of range for the {table} table with {table_len} rows"
+    )]
+    InvalidProfilesTableIndex {
+        column: &'static str,
+        index: i64,
+        table: &'static str,
+        table_len: usize,
+    },
 }
 
 impl From<crate::otlp::common::Dropped> for Error {

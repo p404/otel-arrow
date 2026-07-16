@@ -5188,301 +5188,8 @@ mod test {
 
     /* ─────────────────────────── profiles encode tests ────────────────── */
 
-    use crate::proto::opentelemetry::profiles::v1development::{
-        AttributeUnit as ProfAttributeUnit, Function as ProfFunction, Line as ProfLine,
-        Link as ProfLink, Location as ProfLocation, Mapping as ProfMapping, Profile, ProfilesData,
-        ResourceProfiles, Sample as ProfSample, ScopeProfiles, ValueType as ProfValueType,
-    };
-
-    /// Build a small but full-featured `ProfilesData`: 2 resources, populated
-    /// interned tables (string/function/mapping/location-with-lines/link/
-    /// attribute/attribute-units), presence-sensitive optional fields
-    /// (`link_index = Some(0)`, `mapping_index = None`), an empty `profile_id`,
-    /// an empty link `trace_id`, and Map/Array valued attributes to exercise
-    /// the CBOR ser lane.
-    fn _generate_profiles_data_full() -> ProfilesData {
-        let sample0 = ProfSample {
-            locations_start_index: 0,
-            locations_length: 2,
-            value: vec![100, 1],
-            attribute_indices: vec![0, 1],
-            link_index: Some(1),
-            timestamps_unix_nano: vec![111, 222],
-        };
-        let sample1 = ProfSample {
-            locations_start_index: 2,
-            locations_length: 1,
-            value: vec![200, 2],
-            attribute_indices: vec![],
-            link_index: None,
-            timestamps_unix_nano: vec![],
-        };
-        // `Some(0)` pins optional-field presence: link table row 0 is a valid
-        // reference and must not be conflated with "not present"
-        let sample2 = ProfSample {
-            locations_start_index: 0,
-            locations_length: 0,
-            value: vec![],
-            attribute_indices: vec![3],
-            link_index: Some(0),
-            timestamps_unix_nano: vec![333],
-        };
-        let sample3 = ProfSample {
-            locations_start_index: 1,
-            locations_length: 1,
-            value: vec![300],
-            attribute_indices: vec![4, 5, 6],
-            link_index: None,
-            timestamps_unix_nano: vec![],
-        };
-
-        let profile0 = Profile {
-            sample_type: vec![
-                ProfValueType {
-                    type_strindex: 7,
-                    unit_strindex: 2,
-                    aggregation_temporality: 1,
-                },
-                ProfValueType {
-                    type_strindex: 8,
-                    unit_strindex: 2,
-                    aggregation_temporality: 2,
-                },
-            ],
-            sample: vec![sample0, sample1],
-            location_indices: vec![0, 1, 2],
-            time_nanos: 1_000_000_000,
-            duration_nanos: 5_000,
-            period_type: Some(ProfValueType {
-                type_strindex: 1,
-                unit_strindex: 2,
-                aggregation_temporality: 0,
-            }),
-            period: 10_000,
-            comment_strindices: vec![6],
-            default_sample_type_index: 1,
-            profile_id: (1..=16).collect(),
-            dropped_attributes_count: 3,
-            original_payload_format: "pprof".to_string(),
-            original_payload: vec![9, 9, 9],
-            attribute_indices: vec![2],
-        };
-        // profile with an EMPTY profile_id (proto default) — must encode as null
-        let profile1 = Profile {
-            sample_type: vec![],
-            sample: vec![sample2],
-            location_indices: vec![],
-            time_nanos: 0,
-            duration_nanos: 0,
-            period_type: None,
-            period: 0,
-            comment_strindices: vec![],
-            default_sample_type_index: 0,
-            profile_id: vec![],
-            dropped_attributes_count: 0,
-            original_payload_format: String::new(),
-            original_payload: vec![],
-            attribute_indices: vec![],
-        };
-        let profile2 = Profile {
-            sample_type: vec![ProfValueType {
-                type_strindex: 7,
-                unit_strindex: 2,
-                aggregation_temporality: 1,
-            }],
-            sample: vec![sample3],
-            location_indices: vec![1],
-            time_nanos: 2_000_000_000,
-            duration_nanos: 1,
-            period_type: Some(ProfValueType {
-                type_strindex: 1,
-                unit_strindex: 2,
-                aggregation_temporality: 2,
-            }),
-            period: 1,
-            comment_strindices: vec![],
-            default_sample_type_index: 0,
-            profile_id: (16..=31).collect(),
-            dropped_attributes_count: 0,
-            original_payload_format: String::new(),
-            original_payload: vec![],
-            attribute_indices: vec![],
-        };
-
-        ProfilesData {
-            resource_profiles: vec![
-                ResourceProfiles {
-                    resource: Some(
-                        Resource::build()
-                            .attributes(vec![
-                                KeyValue::new("res.attr", AnyValue::new_string("host1")),
-                                KeyValue::new("res.num", AnyValue::new_int(42)),
-                            ])
-                            .dropped_attributes_count(1u32)
-                            .finish(),
-                    ),
-                    scope_profiles: vec![ScopeProfiles {
-                        scope: Some(
-                            InstrumentationScope::build()
-                                .name("profiler")
-                                .version("1.0")
-                                .attributes(vec![KeyValue::new(
-                                    "scope.attr",
-                                    AnyValue::new_bool(true),
-                                )])
-                                .dropped_attributes_count(2u32)
-                                .finish(),
-                        ),
-                        profiles: vec![profile0, profile1],
-                        schema_url: "https://scope.schema".to_string(),
-                    }],
-                    schema_url: "https://resource.schema".to_string(),
-                },
-                // resource/scope entirely unknown for the second tree
-                ResourceProfiles {
-                    resource: None,
-                    scope_profiles: vec![ScopeProfiles {
-                        scope: None,
-                        profiles: vec![profile2],
-                        schema_url: String::new(),
-                    }],
-                    schema_url: String::new(),
-                },
-            ],
-            mapping_table: vec![
-                ProfMapping {
-                    memory_start: 0x1000,
-                    memory_limit: 0x2000,
-                    file_offset: 77,
-                    filename_strindex: 4,
-                    attribute_indices: vec![0],
-                    has_functions: true,
-                    has_filenames: false,
-                    has_line_numbers: true,
-                    has_inline_frames: false,
-                },
-                ProfMapping::default(),
-            ],
-            location_table: vec![
-                ProfLocation {
-                    mapping_index: Some(0),
-                    address: 0x1234,
-                    line: vec![
-                        ProfLine {
-                            function_index: 0,
-                            line: 10,
-                            column: 2,
-                        },
-                        ProfLine {
-                            function_index: 2,
-                            line: 20,
-                            column: 0,
-                        },
-                    ],
-                    is_folded: false,
-                    attribute_indices: vec![1],
-                },
-                // `mapping_index` not present — must encode as null, distinct
-                // from `Some(0)` in row 0
-                ProfLocation {
-                    mapping_index: None,
-                    address: 0,
-                    line: vec![],
-                    is_folded: true,
-                    attribute_indices: vec![],
-                },
-                ProfLocation {
-                    mapping_index: Some(1),
-                    address: 0x999,
-                    line: vec![ProfLine {
-                        function_index: 1,
-                        line: 7,
-                        column: 1,
-                    }],
-                    is_folded: false,
-                    attribute_indices: vec![],
-                },
-            ],
-            function_table: vec![
-                ProfFunction {
-                    name_strindex: 3,
-                    system_name_strindex: 3,
-                    filename_strindex: 5,
-                    start_line: 10,
-                },
-                ProfFunction {
-                    name_strindex: 1,
-                    system_name_strindex: 0,
-                    filename_strindex: 0,
-                    start_line: 0,
-                },
-                ProfFunction {
-                    name_strindex: 8,
-                    system_name_strindex: 1,
-                    filename_strindex: 5,
-                    start_line: 42,
-                },
-            ],
-            link_table: vec![
-                ProfLink {
-                    trace_id: (1..=16).collect(),
-                    span_id: (1..=8).collect(),
-                },
-                // link with an EMPTY trace_id (proto default) — must encode as null
-                ProfLink {
-                    trace_id: vec![],
-                    span_id: (9..=16).collect(),
-                },
-            ],
-            string_table: vec![
-                // by convention the string table starts with the empty string
-                "".to_string(),
-                "cpu".to_string(),
-                "nanoseconds".to_string(),
-                "main".to_string(),
-                "libc.so".to_string(),
-                "src/main.rs".to_string(),
-                "a comment".to_string(),
-                "samples".to_string(),
-                "count".to_string(),
-            ],
-            attribute_table: vec![
-                KeyValue::new("thread.name", AnyValue::new_string("main")),
-                KeyValue::new("cpu.core", AnyValue::new_int(3)),
-                KeyValue::new("fraction", AnyValue::new_double(0.5)),
-                KeyValue::new("flag", AnyValue::new_bool(true)),
-                KeyValue::new("blob", AnyValue::new_bytes([1u8, 2, 3])),
-                // Map value — exercises the CBOR `ser` lane
-                KeyValue::new(
-                    "ctx",
-                    AnyValue {
-                        value: Some(any_value::Value::KvlistValue(KeyValueList {
-                            values: vec![KeyValue::new("inner", AnyValue::new_int(5))],
-                        })),
-                    },
-                ),
-                // Array value — also serialized into the `ser` lane
-                KeyValue::new(
-                    "arr",
-                    AnyValue {
-                        value: Some(any_value::Value::ArrayValue(ArrayValue {
-                            values: vec![AnyValue::new_int(1), AnyValue::new_string("x")],
-                        })),
-                    },
-                ),
-            ],
-            attribute_units: vec![
-                ProfAttributeUnit {
-                    attribute_key_strindex: 1,
-                    unit_strindex: 2,
-                },
-                ProfAttributeUnit {
-                    attribute_key_strindex: 7,
-                    unit_strindex: 8,
-                },
-            ],
-        }
-    }
+    use crate::proto::opentelemetry::profiles::v1development::ProfilesData;
+    use crate::testing::fixtures::profiles_data_full_fidelity;
 
     /// cast a (possibly dictionary-encoded) column to a plain `StringArray`
     fn profiles_utf8_col(rb: &RecordBatch, name: &str) -> StringArray {
@@ -5571,7 +5278,7 @@ mod test {
 
     #[test]
     fn test_encode_profiles_full_fidelity() {
-        let profiles_data = _generate_profiles_data_full();
+        let profiles_data = profiles_data_full_fidelity();
         let otap_batch = encode_profiles_otap_batch(&profiles_data).unwrap();
         assert!(matches!(otap_batch, OtapArrowRecords::Profiles(_)));
 
@@ -5579,8 +5286,8 @@ mod test {
         let n_functions = profiles_data.function_table.len() as i32; // 3
         let n_mappings = profiles_data.mapping_table.len() as i32; // 2
         let n_locations = profiles_data.location_table.len() as i32; // 3
-        let n_links = profiles_data.link_table.len() as i32; // 2
-        let n_attrs = profiles_data.attribute_table.len() as i32; // 7
+        let n_links = profiles_data.link_table.len() as i32; // 3
+        let n_attrs = profiles_data.attribute_table.len() as i32; // 8
 
         // ── the Profiles root record ────────────────────────────────────
         let profiles_rb = otap_batch.get(ArrowPayloadType::Profiles).expect("root");
@@ -5867,14 +5574,20 @@ mod test {
         assert_eq!(link_rb.num_rows(), profiles_data.link_table.len());
         assert_eq!(
             profiles_col::<UInt32Array>(link_rb, consts::ID).values(),
-            &[0, 1]
+            &[0, 1, 2]
         );
         let trace_id = profiles_col::<FixedSizeBinaryArray>(link_rb, consts::TRACE_ID);
         assert_eq!(trace_id.value(0), (1..=16).collect::<Vec<u8>>());
         assert!(trace_id.is_null(1), "empty trace_id should encode as null");
+        assert_eq!(
+            trace_id.value(2),
+            vec![0u8; 16],
+            "an all-zero 16-byte trace_id must survive verbatim, not become null"
+        );
         let span_id = profiles_col::<FixedSizeBinaryArray>(link_rb, consts::SPAN_ID);
         assert_eq!(span_id.value(0), (1..=8).collect::<Vec<u8>>());
         assert_eq!(span_id.value(1), (9..=16).collect::<Vec<u8>>());
+        assert!(span_id.is_null(2), "empty span_id should encode as null");
 
         let attrs_rb = otap_batch
             .get(ArrowPayloadType::AttributeTable)
@@ -5882,7 +5595,7 @@ mod test {
         assert_eq!(attrs_rb.num_rows(), profiles_data.attribute_table.len());
         assert_eq!(
             profiles_col::<UInt32Array>(attrs_rb, consts::ID).values(),
-            &[0, 1, 2, 3, 4, 5, 6]
+            &[0, 1, 2, 3, 4, 5, 6, 7]
         );
         let attr_keys = profiles_utf8_col(attrs_rb, consts::ATTRIBUTE_KEY);
         let expected_keys: Vec<&str> = profiles_data
@@ -5903,6 +5616,7 @@ mod test {
                 AttributeValueType::Bytes as u8,
                 AttributeValueType::Map as u8,
                 AttributeValueType::Slice as u8,
+                AttributeValueType::Int as u8,
             ]
         );
         let attr_str = profiles_cast_col(attrs_rb, consts::ATTRIBUTE_STR, &DataType::Utf8);
@@ -5912,6 +5626,10 @@ mod test {
         let attr_int = profiles_cast_col(attrs_rb, consts::ATTRIBUTE_INT, &DataType::Int64);
         let attr_int = attr_int.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(attr_int.value(1), 3);
+        // an int value of exactly 0 (the proto default) may be elided to
+        // null (or materialized as a literal 0 once the lane exists for
+        // other rows); either representation must decode back to 0
+        assert!(attr_int.is_null(7) || attr_int.value(7) == 0);
         let attr_double = profiles_col::<Float64Array>(attrs_rb, consts::ATTRIBUTE_DOUBLE);
         assert_eq!(attr_double.value(2), 0.5);
         let attr_bool = profiles_col::<BooleanArray>(attrs_rb, consts::ATTRIBUTE_BOOL);
@@ -5932,16 +5650,18 @@ mod test {
         assert_eq!(units_rb.num_rows(), profiles_data.attribute_units.len());
         assert_eq!(
             profiles_col::<UInt32Array>(units_rb, consts::ID).values(),
-            &[0, 1]
+            &[0, 1, 2]
         );
-        assert_eq!(
-            profiles_col::<Int32Array>(units_rb, consts::ATTRIBUTE_KEY_STRINDEX).values(),
-            &[1, 7]
-        );
-        assert_eq!(
-            profiles_col::<Int32Array>(units_rb, consts::UNIT_STRINDEX).values(),
-            &[2, 8]
-        );
+        let unit_key_strindex =
+            profiles_col::<Int32Array>(units_rb, consts::ATTRIBUTE_KEY_STRINDEX);
+        assert_eq!(unit_key_strindex.value(0), 1);
+        assert_eq!(unit_key_strindex.value(1), 7);
+        // the all-default row is elided to null and decodes back to 0
+        assert!(unit_key_strindex.is_null(2) || unit_key_strindex.value(2) == 0);
+        let unit_strindex = profiles_col::<Int32Array>(units_rb, consts::UNIT_STRINDEX);
+        assert_eq!(unit_strindex.value(0), 2);
+        assert_eq!(unit_strindex.value(1), 8);
+        assert!(unit_strindex.is_null(2) || unit_strindex.value(2) == 0);
 
         // resource/scope attrs side tables, keyed by resource/scope id
         let resource_attrs_rb = otap_batch
@@ -5955,10 +5675,19 @@ mod test {
         let scope_attrs_rb = otap_batch
             .get(ArrowPayloadType::ScopeAttrs)
             .expect("scope attrs");
-        assert_eq!(scope_attrs_rb.num_rows(), 1);
+        assert_eq!(scope_attrs_rb.num_rows(), 2);
         assert_eq!(
             profiles_col::<UInt16Array>(scope_attrs_rb, consts::PARENT_ID).values(),
-            &[0]
+            &[0, 0]
+        );
+        // the ONLY int-valued scope attribute is exactly 0 (the proto
+        // default), so the whole int lane is elided from the batch — the
+        // decode contract restores type=Int with an absent lane to 0
+        assert!(
+            scope_attrs_rb
+                .column_by_name(consts::ATTRIBUTE_INT)
+                .is_none(),
+            "all-default int lane should be omitted from the scope attrs batch"
         );
 
         // ── index integrity: every reference is within its table ────────
@@ -6029,7 +5758,7 @@ mod test {
         use crate::encode::producer::Producer;
         use crate::otap::{Profiles as ProfilesStore, from_record_messages};
 
-        let profiles_data = _generate_profiles_data_full();
+        let profiles_data = profiles_data_full_fidelity();
         let mut input = encode_profiles_otap_batch(&profiles_data).unwrap();
 
         // keep the plain (pre-transport) sample columns for comparison after decode
@@ -6072,7 +5801,7 @@ mod test {
         // (field 1 is `resource_profiles` in both), so serialized `ProfilesData`
         // bytes — including the dictionary table fields that only exist on
         // `ProfilesData` — must convert losslessly through the bytes payload.
-        let profiles_data = _generate_profiles_data_full();
+        let profiles_data = profiles_data_full_fidelity();
         let mut bytes = vec![];
         profiles_data.encode(&mut bytes).unwrap();
 

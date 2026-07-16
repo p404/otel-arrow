@@ -6,13 +6,14 @@ use crate::error::{Error, Result};
 use crate::otap::{OtapArrowRecords, Profiles, from_record_messages};
 use crate::otlp::logs::LogsProtoBytesEncoder;
 use crate::otlp::metrics::MetricsProtoBytesEncoder;
+use crate::otlp::profiles::profiles_data_from;
 use crate::otlp::traces::TracesProtoBytesEncoder;
 use crate::otlp::{ProtoBuffer, ProtoBytesEncoder};
 use crate::proto::opentelemetry::arrow::v1::{ArrowPayload, ArrowPayloadType, BatchArrowRecords};
 use crate::proto::opentelemetry::collector::logs::v1::ExportLogsServiceRequest;
 use crate::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
-use crate::proto::opentelemetry::collector::profiles::v1development::ExportProfilesServiceRequest;
 use crate::proto::opentelemetry::collector::trace::v1::ExportTraceServiceRequest;
+use crate::proto::opentelemetry::profiles::v1development::ProfilesData;
 use arrow::array::RecordBatch;
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
@@ -178,26 +179,27 @@ impl Consumer {
     }
 
     /// Consumes all the arrow payloads in the passed OTAP `BatchArrayRecords` and decodes them
-    /// into a validated `Profiles` OTAP batch.
+    /// into the OTLP `ProfilesData` message.
     ///
     /// Unlike [`Self::consume_logs_batches`]/[`Self::consume_metrics_batches`]/
-    /// [`Self::consume_traces_batches`], this does not go on to produce an
-    /// `ExportProfilesServiceRequest`: there is no `ProfilesProtoBytesEncoder`
-    /// yet (OTAP profiles -> OTLP proto encoding is not implemented, see
-    /// [`Error::ProfilesNotImplemented`]). The record batches are still fully
-    /// decoded and validated against the `Profiles` OTAP schema so callers get
-    /// a clear, typed error rather than a panic or a silently-dropped batch.
+    /// [`Self::consume_traces_batches`], this returns `ProfilesData` rather
+    /// than the `ExportProfilesServiceRequest`: in the pinned `v1development`
+    /// proto the request message only carries `resource_profiles` (field 1)
+    /// and has no fields for the dictionary tables, so returning it would
+    /// silently drop every interned table. `ProfilesData` is wire-compatible
+    /// with the request on field 1 and keeps the tables (fields 2..=8); see
+    /// [`crate::otlp::profiles`] for details. The reconstruction is
+    /// stateless (unlike the byte-streaming encoders of the other signals),
+    /// so no encoder state is held on the `Consumer` for profiles.
     pub fn consume_profiles_batches(
         &mut self,
         records: &mut BatchArrowRecords,
-    ) -> Result<ExportProfilesServiceRequest> {
+    ) -> Result<ProfilesData> {
         let record_messages = self.consume_bar(records)?;
-        let _otap_batch =
+        let mut otap_batch =
             OtapArrowRecords::Profiles(from_record_messages::<Profiles>(record_messages)?);
 
-        Err(Error::ProfilesNotImplemented {
-            feature: "OTAP profiles -> OTLP proto encoding",
-        })
+        profiles_data_from(&mut otap_batch)
     }
 }
 
@@ -409,6 +411,65 @@ mod tests {
             result.is_ok(),
             "should decode traces even when root is not at position 0: {result:?}"
         );
+    }
+
+    #[test]
+    fn test_consume_profiles_root_not_at_position_zero() {
+        use crate::encode::encode_profiles_otap_batch;
+        use crate::testing::fixtures::profiles_data_full_fidelity;
+
+        let profiles_data = profiles_data_full_fidelity();
+        let mut otap = encode_profiles_otap_batch(&profiles_data).expect("encode profiles");
+        let mut bar = produce_bar(&mut otap);
+
+        // Ensure there are multiple payloads and move the root (Profiles) to the end
+        assert!(
+            bar.arrow_payloads.len() > 1,
+            "need multiple payloads to test reordering"
+        );
+        let profiles_idx = bar
+            .arrow_payloads
+            .iter()
+            .position(|p| p.r#type == ArrowPayloadType::Profiles as i32)
+            .expect("Profiles payload should exist");
+        let profiles_payload = bar.arrow_payloads.remove(profiles_idx);
+        bar.arrow_payloads.push(profiles_payload);
+        assert_ne!(
+            bar.arrow_payloads[0].r#type,
+            ArrowPayloadType::Profiles as i32,
+            "root payload should not be at position 0 for this test"
+        );
+
+        let mut consumer = Consumer::default();
+        let result = consumer.consume_profiles_batches(&mut bar);
+        assert!(
+            result.is_ok(),
+            "should decode profiles even when root is not at position 0: {result:?}"
+        );
+        assert_eq!(result.unwrap(), profiles_data);
+    }
+
+    #[test]
+    fn test_consume_profiles_missing_root_payload() {
+        use crate::encode::encode_profiles_otap_batch;
+        use crate::testing::fixtures::profiles_data_full_fidelity;
+
+        let profiles_data = profiles_data_full_fidelity();
+        let mut otap = encode_profiles_otap_batch(&profiles_data).expect("encode profiles");
+        let mut bar = produce_bar(&mut otap);
+
+        // Remove the Profiles root payload entirely: like the other signals,
+        // a missing root is semantically zero rows (the interned tables are
+        // still decoded verbatim).
+        bar.arrow_payloads
+            .retain(|p| p.r#type != ArrowPayloadType::Profiles as i32);
+
+        let mut consumer = Consumer::default();
+        let result = consumer.consume_profiles_batches(&mut bar);
+        assert!(result.is_ok(), "expected ok, got: {result:?}");
+        let result = result.unwrap();
+        assert!(result.resource_profiles.is_empty());
+        assert_eq!(result.string_table, profiles_data.string_table);
     }
 
     // Missing root payloads were originally disallowed, but this

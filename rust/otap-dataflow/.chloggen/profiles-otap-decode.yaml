@@ -1,0 +1,29 @@
+# Use this changelog template to create an entry for release notes.
+
+# One of 'breaking', 'deprecation', 'new_component', 'enhancement', 'bug_fix'
+change_type: enhancement
+
+# The name of the component, or a single word describing the area of concern, (e.g. engine, otap).
+# Must be one of the components listed in rust/otap-dataflow/.chloggen/config.yaml.
+component: pdata
+
+# A brief description of the change.  Surround your text with quotes ("") if it needs to start with a backtick (`).
+note: Implement the OTAP -> OTLP decoding for the profiles signal (`profiles_data_from` / `ProfilesProtoBytesEncoder`), completing a byte-identical OTLP profiles round trip.
+
+# Mandatory: One or more tracking issues related to the change. You can use the PR number here if no issue exists.
+issues: [2303]
+
+# (Optional) One or more lines of additional information to render under the primary note.
+# These lines will be padded with 2 spaces and then inserted directly into the document.
+# Use pipe (|) for multiline entries.
+subtext: |
+  Reconstructs `ProfilesData` from the OTAP profiles record batches: the interned lookup tables
+  (string/function/mapping/location/link/attribute/attribute-units) are transposed back verbatim
+  (row order = index identity) and the resource/scope/profile/sample tree is regrouped by
+  resource and scope ids. `Consumer::consume_profiles_batches` now returns the decoded
+  `ProfilesData` and the `OtapArrowRecords` -> `OtlpProtoBytes` conversion is wired for
+  profiles (emitting `ProfilesData` bytes, which are wire-compatible with
+  `ExportProfilesServiceRequest` on field 1 and preserve the dictionary tables). Every
+  table-referencing index is validated during decode; negative or out-of-range indices produce
+  a typed error. Round trips are pinned byte-for-byte by tests, both directly and through the
+  `Producer`/`Consumer` Arrow IPC wire path.
