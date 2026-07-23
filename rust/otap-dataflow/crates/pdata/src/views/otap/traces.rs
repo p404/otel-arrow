@@ -661,7 +661,7 @@ impl<'a> OtapSpanView<'a> {
     /// Get the span's row ID from the "id" column (used for attribute/event/link matching)
     #[inline]
     fn get_span_row_id(&self) -> Option<u16> {
-        let array = &self.columns()?.id;
+        let array = self.columns()?.id?;
         if array.is_valid(self.row_idx) {
             Some(array.value(self.row_idx))
         } else {

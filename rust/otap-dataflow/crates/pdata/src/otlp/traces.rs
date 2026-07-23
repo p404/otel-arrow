@@ -415,7 +415,7 @@ impl TracesProtoBytesEncoder {
         }
 
         if let Some(span_attrs) = &traces_data_arrays.span_attrs {
-            if let Some(id) = span_arrays.id.value_at(index) {
+            if let Some(id) = span_arrays.id.and_then(|array| array.value_at(index)) {
                 let attrs_index_iter =
                     ChildIndexIter::new(id, &span_attrs.parent_id, &mut self.spans_attrs_cursor);
                 for attr_index in attrs_index_iter {
@@ -434,7 +434,7 @@ impl TracesProtoBytesEncoder {
         }
 
         if let Some(span_events) = &traces_data_arrays.span_events {
-            if let Some(id) = span_arrays.id.value_at(index) {
+            if let Some(id) = span_arrays.id.and_then(|array| array.value_at(index)) {
                 let parent_ids = MaybeDictArrayAccessor::Native(span_events.parent_id);
                 let events_index_iter =
                     ChildIndexIter::new(id, &parent_ids, &mut self.span_events_cursor);
@@ -460,7 +460,7 @@ impl TracesProtoBytesEncoder {
         }
 
         if let Some(span_links) = &traces_data_arrays.span_links {
-            if let Some(id) = span_arrays.id.value_at(index) {
+            if let Some(id) = span_arrays.id.and_then(|array| array.value_at(index)) {
                 let parent_ids = MaybeDictArrayAccessor::Native(span_links.parent_id);
                 let links_index_iter =
                     ChildIndexIter::new(id, &parent_ids, &mut self.span_links_cursor);
@@ -880,6 +880,81 @@ mod test {
         );
         let decoded = TracesData::decode(result_buf.as_ref()).unwrap();
         assert!(decoded.resource_spans.is_empty());
+    }
+
+    #[test]
+    fn test_proto_encode_attribute_free_spans_without_id_column() {
+        let resource_fields = Fields::from(vec![
+            Field::new(consts::ID, DataType::UInt16, true).with_plain_encoding(),
+        ]);
+        let scope_fields = Fields::from(vec![
+            Field::new(consts::ID, DataType::UInt16, true).with_plain_encoding(),
+        ]);
+        let spans = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(
+                    consts::RESOURCE,
+                    DataType::Struct(resource_fields.clone()),
+                    true,
+                ),
+                Field::new(consts::SCOPE, DataType::Struct(scope_fields.clone()), true),
+                Field::new(consts::TRACE_ID, DataType::FixedSizeBinary(16), true),
+                Field::new(consts::SPAN_ID, DataType::FixedSizeBinary(8), false),
+                Field::new(consts::NAME, DataType::Utf8, false),
+                Field::new(
+                    consts::START_TIME_UNIX_NANO,
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    false,
+                ),
+                Field::new(
+                    consts::DURATION_TIME_UNIX_NANO,
+                    DataType::Duration(TimeUnit::Nanosecond),
+                    false,
+                ),
+            ])),
+            vec![
+                Arc::new(StructArray::new(
+                    resource_fields,
+                    vec![Arc::new(UInt16Array::from_iter_values([0]))],
+                    None,
+                )),
+                Arc::new(StructArray::new(
+                    scope_fields,
+                    vec![Arc::new(UInt16Array::from_iter_values([0]))],
+                    None,
+                )),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([1u128.to_be_bytes().to_vec()].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([2u64.to_be_bytes().to_vec()].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(StringArray::from_iter_values(["no-attributes"])),
+                Arc::new(TimestampNanosecondArray::from_iter_values([100])),
+                Arc::new(DurationNanosecondArray::from_iter_values([5])),
+            ],
+        )
+        .unwrap();
+        assert!(
+            spans.column_by_name(consts::ID).is_none(),
+            "fixture must model the transport-optimized Go exporter shape"
+        );
+
+        let mut otap_batch = OtapArrowRecords::Traces(Traces::default());
+        otap_batch.set(ArrowPayloadType::Spans, spans).unwrap();
+        let mut result_buf = ProtoBuffer::default();
+        TracesProtoBytesEncoder::new()
+            .encode(&mut otap_batch, &mut result_buf)
+            .unwrap();
+
+        let decoded = TracesData::decode(result_buf.as_ref()).unwrap();
+        let span = &decoded.resource_spans[0].scope_spans[0].spans[0];
+        assert_eq!(span.name, "no-attributes");
+        assert!(span.attributes.is_empty());
+        assert!(span.events.is_empty());
+        assert!(span.links.is_empty());
     }
 
     #[test]

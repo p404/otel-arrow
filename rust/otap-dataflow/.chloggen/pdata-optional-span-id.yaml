@@ -1,0 +1,9 @@
+# Use this changelog template to create an entry for release notes.
+
+change_type: bug_fix
+component: pdata
+note: Decode transport-optimized, attribute-free OTAP spans when the unused root `id` join column is omitted.
+issues: [2303]
+subtext: |
+  The span root ID remains available when child attribute, event, or link
+  payloads require it, matching the existing optional-ID behavior for logs.
