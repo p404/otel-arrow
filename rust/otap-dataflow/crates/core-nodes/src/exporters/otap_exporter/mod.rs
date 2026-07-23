@@ -34,6 +34,7 @@ use otap_df_pdata::proto::opentelemetry::arrow::v1::{BatchArrowRecords, BatchSta
 use otap_df_pdata::proto::opentelemetry::arrow::v1::{
     arrow_logs_service_client::ArrowLogsServiceClient,
     arrow_metrics_service_client::ArrowMetricsServiceClient,
+    arrow_profiles_service_client::ArrowProfilesServiceClient,
     arrow_traces_service_client::ArrowTracesServiceClient,
 };
 use otap_df_telemetry::instrument::{Gauge, Mmsc};
@@ -441,6 +442,7 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
         let mut arrow_metrics_client = ArrowMetricsServiceClient::new(channel.clone());
         let mut arrow_logs_client = ArrowLogsServiceClient::new(channel.clone());
         let mut arrow_traces_client = ArrowTracesServiceClient::new(channel.clone());
+        let mut arrow_profiles_client = ArrowProfilesServiceClient::new(channel.clone());
 
         if let Some(ref compression) = self.config.compression_method {
             let encoding = compression.map_to_compression_encoding();
@@ -451,6 +453,9 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
                 .send_compressed(encoding)
                 .accept_compressed(encoding);
             arrow_traces_client = arrow_traces_client
+                .send_compressed(encoding)
+                .accept_compressed(encoding);
+            arrow_profiles_client = arrow_profiles_client
                 .send_compressed(encoding)
                 .accept_compressed(encoding);
         }
@@ -538,6 +543,16 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
             shutdown_rx.clone(),
             static_metadata.clone(),
         );
+        let (profiles_senders, profiles_handles) = spawn_stream_workers(
+            arrow_profiles_client,
+            SignalType::Profiles,
+            ipc_compression,
+            stream_queue_capacity,
+            streams_per_signal,
+            pdata_metrics_tx.clone(),
+            shutdown_rx.clone(),
+            static_metadata.clone(),
+        );
 
         // Loop until a Shutdown event is received.
         loop {
@@ -573,6 +588,7 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
                                 .into_iter()
                                 .chain(metrics_handles)
                                 .chain(traces_handles)
+                                .chain(profiles_handles)
                                 .collect(),
                             &mut pdata_metrics_rx,
                             &effect_handler,
@@ -590,17 +606,6 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
                         let signal_type = pdata.signal_type();
 
                         self.pdata_metrics.inc_consumed(signal_type);
-
-                        if signal_type == SignalType::Profiles {
-                            // No Arrow gRPC service/stream-worker pool exists yet
-                            // for profiles (see `ArrowLogsServiceClient` and its
-                            // siblings above), so there is nowhere to route this
-                            // batch. Nack it clearly rather than silently
-                            // dropping it or panicking.
-                            self.pdata_metrics.inc_failed(signal_type);
-                            effect_handler.notify_nack(NackMsg::new("profiles are not yet supported by the OTAP exporter", pdata)).await?;
-                            continue;
-                        }
 
                         let payload = pdata.take_payload();
 
@@ -621,7 +626,7 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
                             SignalType::Logs => least_loaded_stream_sender(&logs_senders),
                             SignalType::Metrics => least_loaded_stream_sender(&metrics_senders),
                             SignalType::Traces => least_loaded_stream_sender(&traces_senders),
-                            SignalType::Profiles => unreachable!("handled above"),
+                            SignalType::Profiles => least_loaded_stream_sender(&profiles_senders),
                         };
                         self.enqueue_stream_batch(
                             sender,
@@ -740,6 +745,16 @@ impl StreamingArrowService for ArrowTracesServiceClient<Channel> {
         req_stream: impl IntoStreamingRequest<Message = BatchArrowRecords> + Send,
     ) -> Result<Response<Streaming<BatchStatus>>, Status> {
         self.arrow_traces(req_stream).await
+    }
+}
+
+#[async_trait]
+impl StreamingArrowService for ArrowProfilesServiceClient<Channel> {
+    async fn handle_req_stream(
+        &mut self,
+        req_stream: impl IntoStreamingRequest<Message = BatchArrowRecords> + Send,
+    ) -> Result<Response<Streaming<BatchStatus>>, Status> {
+        self.arrow_profiles(req_stream).await
     }
 }
 

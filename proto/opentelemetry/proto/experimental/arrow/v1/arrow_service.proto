@@ -47,6 +47,11 @@ service ArrowMetricsService {
   rpc ArrowMetrics(stream BatchArrowRecords) returns (stream BatchStatus) {}
 }
 
+// ArrowProfilesService is a profiles-only Arrow stream.
+service ArrowProfilesService {
+  rpc ArrowProfiles(stream BatchArrowRecords) returns (stream BatchStatus) {}
+}
+
 // A message sent by an exporter to a collector containing a batch of Arrow
 // records.
 message BatchArrowRecords {

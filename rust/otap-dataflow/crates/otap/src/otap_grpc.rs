@@ -20,10 +20,13 @@ use otap_df_engine::{
 };
 use otap_df_pdata::{
     Consumer,
-    otap::{Logs, Metrics, OtapArrowRecords, OtapBatchStore, Traces, from_record_messages},
+    otap::{
+        Logs, Metrics, OtapArrowRecords, OtapBatchStore, Profiles, Traces, from_record_messages,
+    },
     proto::opentelemetry::arrow::v1::{
         BatchArrowRecords, BatchStatus, StatusCode, arrow_logs_service_server::ArrowLogsService,
         arrow_metrics_service_server::ArrowMetricsService,
+        arrow_profiles_service_server::ArrowProfilesService,
         arrow_traces_service_server::ArrowTracesService,
     },
 };
@@ -143,6 +146,33 @@ pub struct ArrowTracesServiceImpl {
     settings: Settings,
 }
 
+/// struct that implements the ArrowProfilesService trait
+pub struct ArrowProfilesServiceImpl {
+    effect_handler: shared::EffectHandler<OtapPdata>,
+    state: Option<SharedState>,
+    settings: Settings,
+}
+
+impl ArrowProfilesServiceImpl {
+    /// create a new ArrowProfilesServiceImpl struct with a sendable effect handler
+    #[must_use]
+    pub fn new(effect_handler: shared::EffectHandler<OtapPdata>, settings: &Settings) -> Self {
+        Self {
+            effect_handler,
+            state: settings
+                .wait_for_result
+                .then(|| SharedState::new(settings.max_concurrent_requests)),
+            settings: settings.clone(),
+        }
+    }
+
+    /// Get this server's shared state for Ack/Nack routing
+    #[must_use]
+    pub fn state(&self) -> Option<SharedState> {
+        self.state.clone()
+    }
+}
+
 impl ArrowTracesServiceImpl {
     /// create a new ArrowTracesServiceImpl struct with a sendable effect handler
     #[must_use]
@@ -244,6 +274,30 @@ impl ArrowTracesService for ArrowTracesServiceImpl {
         );
 
         Ok(Response::new(Box::pin(output) as Self::ArrowTracesStream))
+    }
+}
+
+#[tonic::async_trait]
+impl ArrowProfilesService for ArrowProfilesServiceImpl {
+    type ArrowProfilesStream =
+        Pin<Box<dyn Stream<Item = Result<BatchStatus, Status>> + Send + 'static>>;
+    async fn arrow_profiles(
+        &self,
+        request: Request<Streaming<BatchArrowRecords>>,
+    ) -> Result<Response<Self::ArrowProfilesStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(self.settings.response_stream_channel_size);
+        let output = ReceiverStream::new(rx);
+        let peer_addr = peer_addr_from_extensions(request.extensions());
+        spawn_stream_handler::<Profiles, _>(
+            request.into_inner(),
+            OtapArrowRecords::Profiles,
+            self.effect_handler.clone(),
+            self.state.clone(),
+            self.settings.clone(),
+            tx,
+            peer_addr,
+        );
+        Ok(Response::new(Box::pin(output) as Self::ArrowProfilesStream))
     }
 }
 
@@ -696,4 +750,6 @@ pub enum OtapArrowBytes {
     ArrowLogs(BatchArrowRecords),
     /// Trace object
     ArrowTraces(BatchArrowRecords),
+    /// Profiles object
+    ArrowProfiles(BatchArrowRecords),
 }

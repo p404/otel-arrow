@@ -16,7 +16,8 @@ use otap_df_otap::memory_pressure_layer::{MemoryPressureLayer, ReceiverRejection
 use otap_df_otap::otap_grpc::middleware::zstd_header::ZstdRequestHeaderAdapter;
 use otap_df_otap::otap_grpc::otlp::server::{RouteResponse, SharedState};
 use otap_df_otap::otap_grpc::{
-    ArrowLogsServiceImpl, ArrowMetricsServiceImpl, ArrowTracesServiceImpl, Settings,
+    ArrowLogsServiceImpl, ArrowMetricsServiceImpl, ArrowProfilesServiceImpl,
+    ArrowTracesServiceImpl, Settings,
 };
 use otap_df_otap::pdata::OtapPdata;
 use otap_df_otap::tls_utils::{build_tls_acceptor, create_tls_stream};
@@ -39,6 +40,7 @@ use otap_df_engine::terminal_state::TerminalState;
 use otap_df_pdata::proto::opentelemetry::arrow::v1::{
     arrow_logs_service_server::ArrowLogsServiceServer,
     arrow_metrics_service_server::ArrowMetricsServiceServer,
+    arrow_profiles_service_server::ArrowProfilesServiceServer,
     arrow_traces_service_server::ArrowTracesServiceServer,
 };
 use otap_df_telemetry::instrument::Counter;
@@ -320,6 +322,7 @@ struct SharedStates {
     logs: Option<SharedState>,
     metrics: Option<SharedState>,
     traces: Option<SharedState>,
+    profiles: Option<SharedState>,
 }
 
 impl SharedStates {
@@ -327,6 +330,7 @@ impl SharedStates {
         self.logs.as_ref().is_none_or(SharedState::is_empty)
             && self.metrics.as_ref().is_none_or(SharedState::is_empty)
             && self.traces.as_ref().is_none_or(SharedState::is_empty)
+            && self.profiles.as_ref().is_none_or(SharedState::is_empty)
     }
 
     fn force_shutdown(&self, reason: &str) {
@@ -338,6 +342,9 @@ impl SharedStates {
         }
         if let Some(state) = &self.traces {
             state.force_shutdown(SignalType::Traces, reason);
+        }
+        if let Some(state) = &self.profiles {
+            state.force_shutdown(SignalType::Profiles, reason);
         }
     }
 }
@@ -377,16 +384,19 @@ impl shared::Receiver<OtapPdata> for OTAPReceiver {
         let logs_service = ArrowLogsServiceImpl::new(effect_handler.clone(), &settings);
         let metrics_service = ArrowMetricsServiceImpl::new(effect_handler.clone(), &settings);
         let traces_service = ArrowTracesServiceImpl::new(effect_handler.clone(), &settings);
+        let profiles_service = ArrowProfilesServiceImpl::new(effect_handler.clone(), &settings);
 
         let states = SharedStates {
             logs: logs_service.state(),
             metrics: metrics_service.state(),
             traces: traces_service.state(),
+            profiles: profiles_service.state(),
         };
 
         let mut logs_server = ArrowLogsServiceServer::new(logs_service);
         let mut metrics_server = ArrowMetricsServiceServer::new(metrics_service);
         let mut traces_server = ArrowTracesServiceServer::new(traces_service);
+        let mut profiles_server = ArrowProfilesServiceServer::new(profiles_service);
 
         // apply the tonic compression if it is set
         if let Some(ref compression) = self.config.compression_method {
@@ -399,6 +409,9 @@ impl shared::Receiver<OtapPdata> for OTAPReceiver {
                 .send_compressed(encoding)
                 .accept_compressed(encoding);
             traces_server = traces_server
+                .send_compressed(encoding)
+                .accept_compressed(encoding);
+            profiles_server = profiles_server
                 .send_compressed(encoding)
                 .accept_compressed(encoding);
         }
@@ -430,7 +443,8 @@ impl shared::Receiver<OtapPdata> for OTAPReceiver {
             .layer(MiddlewareLayer::new(ZstdRequestHeaderAdapter::default()))
             .add_service(logs_server)
             .add_service(metrics_server)
-            .add_service(traces_server);
+            .add_service(traces_server)
+            .add_service(profiles_server);
 
         let grpc_shutdown = CancellationToken::new();
         let server_task = {

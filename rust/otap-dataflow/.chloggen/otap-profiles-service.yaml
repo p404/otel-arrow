@@ -1,0 +1,9 @@
+# Use this changelog template to create an entry for release notes.
+
+change_type: enhancement
+component: otap
+note: Add the ArrowProfiles streaming service and route profile batches through OTAP receivers and exporters.
+issues: [2303]
+subtext: |
+  Profiles now use the same bounded stream workers, acknowledgements,
+  compression, retry behavior, and graceful shutdown as the existing signals.
