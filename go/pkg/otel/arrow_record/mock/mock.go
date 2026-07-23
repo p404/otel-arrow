@@ -15,6 +15,7 @@ import (
 	v1 "github.com/open-telemetry/otel-arrow/go/api/experimental/arrow/v1"
 	plog "go.opentelemetry.io/collector/pdata/plog"
 	pmetric "go.opentelemetry.io/collector/pdata/pmetric"
+	pprofile "go.opentelemetry.io/collector/pdata/pprofile"
 	ptrace "go.opentelemetry.io/collector/pdata/ptrace"
 	gomock "go.uber.org/mock/gomock"
 )
@@ -70,6 +71,21 @@ func (m *MockProducerAPI) BatchArrowRecordsFromMetrics(arg0 pmetric.Metrics) (*v
 func (mr *MockProducerAPIMockRecorder) BatchArrowRecordsFromMetrics(arg0 any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BatchArrowRecordsFromMetrics", reflect.TypeOf((*MockProducerAPI)(nil).BatchArrowRecordsFromMetrics), arg0)
+}
+
+// BatchArrowRecordsFromProfiles mocks base method.
+func (m *MockProducerAPI) BatchArrowRecordsFromProfiles(arg0 pprofile.Profiles) (*v1.BatchArrowRecords, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "BatchArrowRecordsFromProfiles", arg0)
+	ret0, _ := ret[0].(*v1.BatchArrowRecords)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// BatchArrowRecordsFromProfiles indicates an expected call of BatchArrowRecordsFromProfiles.
+func (mr *MockProducerAPIMockRecorder) BatchArrowRecordsFromProfiles(arg0 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BatchArrowRecordsFromProfiles", reflect.TypeOf((*MockProducerAPI)(nil).BatchArrowRecordsFromProfiles), arg0)
 }
 
 // BatchArrowRecordsFromTraces mocks base method.

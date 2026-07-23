@@ -1,0 +1,7 @@
+change_type: enhancement
+component: pkg/otel/arrow
+note: "Add native Arrow profile payload production from Collector profiles pdata."
+issues: [0]
+subtext: |
+  The producer now emits the Profiles, Sample, resource/scope attribute, and
+  dictionary table payloads required by the ArrowProfiles OTAP service.

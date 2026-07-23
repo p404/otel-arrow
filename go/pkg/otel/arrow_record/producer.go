@@ -18,6 +18,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/pprofile"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	colarspb "github.com/open-telemetry/otel-arrow/go/api/experimental/arrow/v1"
@@ -30,6 +31,7 @@ import (
 	logsarrow "github.com/open-telemetry/otel-arrow/go/pkg/otel/logs/arrow"
 	metricsarrow "github.com/open-telemetry/otel-arrow/go/pkg/otel/metrics/arrow"
 	"github.com/open-telemetry/otel-arrow/go/pkg/otel/observer"
+	profilesarrow "github.com/open-telemetry/otel-arrow/go/pkg/otel/profiles/arrow"
 	pstats "github.com/open-telemetry/otel-arrow/go/pkg/otel/stats"
 	tracesarrow "github.com/open-telemetry/otel-arrow/go/pkg/otel/traces/arrow"
 	"github.com/open-telemetry/otel-arrow/go/pkg/record_message"
@@ -46,6 +48,7 @@ type ProducerAPI interface {
 	BatchArrowRecordsFromTraces(ptrace.Traces) (*colarspb.BatchArrowRecords, error)
 	BatchArrowRecordsFromLogs(plog.Logs) (*colarspb.BatchArrowRecords, error)
 	BatchArrowRecordsFromMetrics(pmetric.Metrics) (*colarspb.BatchArrowRecords, error)
+	BatchArrowRecordsFromProfiles(pprofile.Profiles) (*colarspb.BatchArrowRecords, error)
 	Close() error
 }
 
@@ -198,6 +201,20 @@ func NewProducerWithOptions(options ...cfg.Option) *Producer {
 // SetObserver adds an observer to the producer.
 func (p *Producer) SetObserver(observer observer.ProducerObserver) {
 	p.observer = observer
+}
+
+// BatchArrowRecordsFromProfiles produces a BatchArrowRecords message from
+// dictionary-native Collector profiles pdata.
+func (p *Producer) BatchArrowRecordsFromProfiles(profiles pprofile.Profiles) (*colarspb.BatchArrowRecords, error) {
+	records, err := profilesarrow.Encode(p.pool, profiles)
+	if err != nil {
+		return nil, werror.Wrap(err)
+	}
+	batch, err := p.Produce(records)
+	if err != nil {
+		return nil, werror.Wrap(err)
+	}
+	return batch, nil
 }
 
 // BatchArrowRecordsFromMetrics produces a BatchArrowRecords message from a [pmetric.Metrics] messages.
