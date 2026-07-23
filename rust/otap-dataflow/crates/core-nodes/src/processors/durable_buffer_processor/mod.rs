@@ -1176,6 +1176,7 @@ impl DurableBuffer {
         effect_handler: &mut EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
         let (context, payload) = data.into_parts();
+        let transport_headers = context.transport_headers().cloned();
 
         // Capture signal type before consuming the payload
         let signal_type = payload.signal_type();
@@ -1208,7 +1209,10 @@ impl DurableBuffer {
                         // Store as opaque binary for efficient pass-through.
                         // Item count is computed once inside the adapter constructor
                         // (protobuf wire-format scan, no full deserialization) and cached.
-                        match OtlpBytesAdapter::new(otlp_bytes) {
+                        match OtlpBytesAdapter::new_with_transport_headers(
+                            otlp_bytes,
+                            transport_headers.as_ref(),
+                        ) {
                             Ok(adapter) => {
                                 let num_items = adapter.cached_item_count();
                                 let result = match engine.ingest(&adapter).await {
@@ -1246,7 +1250,29 @@ impl DurableBuffer {
                             Ok(records) => {
                                 // Count items from Arrow data (cheap - just num_rows)
                                 let num_items = records.num_items() as u64;
-                                let adapter = OtapRecordBundleAdapter::new(records);
+                                let adapter =
+                                    match OtapRecordBundleAdapter::new_with_transport_headers(
+                                        records,
+                                        transport_headers.as_ref(),
+                                    ) {
+                                        Ok(adapter) => adapter,
+                                        Err((error, _records)) => {
+                                            self.metrics.ingest_errors.add(1);
+                                            let nack_pdata = OtapPdata::new(
+                                                context,
+                                                OtapPayload::OtlpBytes(bytes_for_nack),
+                                            );
+                                            effect_handler
+                                            .notify_nack(NackMsg::new(
+                                                format!(
+                                                    "transport-header persistence failed: {error}"
+                                                ),
+                                                nack_pdata,
+                                            ))
+                                            .await?;
+                                            return Ok(());
+                                        }
+                                    };
                                 let result = match engine.ingest(&adapter).await {
                                     Ok(()) => Ok(()),
                                     // Ingest failed: NACK with the Arrow records we tried to store
@@ -1279,7 +1305,24 @@ impl DurableBuffer {
             OtapPayload::OtapArrowRecords(records) => {
                 // Native Arrow data: count items (cheap) and store directly.
                 let num_items = records.num_items() as u64;
-                let adapter = OtapRecordBundleAdapter::new(records);
+                let adapter = match OtapRecordBundleAdapter::new_with_transport_headers(
+                    records,
+                    transport_headers.as_ref(),
+                ) {
+                    Ok(adapter) => adapter,
+                    Err((error, records)) => {
+                        self.metrics.ingest_errors.add(1);
+                        let nack_pdata =
+                            OtapPdata::new(context, OtapPayload::OtapArrowRecords(records));
+                        effect_handler
+                            .notify_nack(NackMsg::new(
+                                format!("transport-header persistence failed: {error}"),
+                                nack_pdata,
+                            ))
+                            .await?;
+                        return Ok(());
+                    }
+                };
                 let result = match engine.ingest(&adapter).await {
                     Ok(()) => Ok(()),
                     Err(e) => Err((e, OtapPayload::OtapArrowRecords(adapter.into_inner()))),
@@ -2258,6 +2301,7 @@ mod tests {
     #[test]
     fn test_retry_wakeup_resumes_retry_logic() {
         use otap_df_config::node::NodeUserConfig;
+        use otap_df_config::transport_headers::{TransportHeader, TransportHeaders};
         use otap_df_engine::config::ProcessorConfig;
         use otap_df_engine::context::ControllerContext;
         use otap_df_engine::control::pipeline_completion_msg_channel;
@@ -2304,9 +2348,22 @@ mod tests {
                 let mut datagen = DataGenerator::new(1);
                 let input = datagen.generate_logs();
                 let rec = encode_logs_otap_batch(&input).expect("encode logs");
-                ctx.process(Message::PData(OtapPdata::new_default(rec.into())))
-                    .await
-                    .expect("process input");
+                let mut headers = TransportHeaders::new();
+                headers.push(TransportHeader::text(
+                    "ote-producer-id",
+                    "OTE-Producer-Id",
+                    b"tenant-a/synthetic",
+                ));
+                headers.push(TransportHeader::binary(
+                    "ote-producer-sequence-bin",
+                    "OTE-Producer-Sequence-Bin",
+                    [0, 0, 0, 42],
+                ));
+                ctx.process(Message::PData(
+                    OtapPdata::new_default(rec.into()).with_transport_headers(headers),
+                ))
+                .await
+                .expect("process input");
 
                 ctx.process(Message::Control(NodeControlMsg::TimerTick {}))
                     .await
@@ -2315,6 +2372,21 @@ mod tests {
                 assert_eq!(outputs.len(), 1, "timer tick should emit one bundle");
 
                 let sent = outputs.pop().expect("sent bundle");
+                {
+                    let sent_headers = sent
+                        .transport_headers()
+                        .expect("durable reconstruction must retain transport headers");
+                    assert_eq!(sent_headers.len(), 2);
+                    let mut sent_headers = sent_headers.iter();
+                    assert_eq!(
+                        sent_headers.next().expect("producer id header").value,
+                        b"tenant-a/synthetic"
+                    );
+                    assert_eq!(
+                        sent_headers.next().expect("sequence header").value,
+                        [0, 0, 0, 42]
+                    );
+                }
                 let (_, nack) =
                     next_nack(NackMsg::new("retry", sent)).expect("expected nack subscriber");
                 ctx.process(Message::Control(NodeControlMsg::Nack(nack)))
@@ -2337,6 +2409,19 @@ mod tests {
                 let retried = ctx.drain_pdata().await;
                 assert_eq!(retried.len(), 1, "wakeup should resume retry delivery");
                 assert_eq!(retried[0].signal_type(), SignalType::Logs);
+                let retried_headers = retried[0]
+                    .transport_headers()
+                    .expect("retry must retain durable transport headers");
+                assert_eq!(retried_headers.len(), 2);
+                let mut retried_headers = retried_headers.iter();
+                assert_eq!(
+                    retried_headers.next().expect("producer id header").value,
+                    b"tenant-a/synthetic"
+                );
+                assert_eq!(
+                    retried_headers.next().expect("sequence header").value,
+                    [0, 0, 0, 42]
+                );
             })
             .validate(|_| async {});
     }

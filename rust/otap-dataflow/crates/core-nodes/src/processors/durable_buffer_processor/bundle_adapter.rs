@@ -58,6 +58,7 @@ use otap_df_pdata::otap::{Logs, Metrics, OtapArrowRecords, OtapBatchStore, Profi
 use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use otap_df_pdata::{OtapPayload, OtapPayloadHelpers, OtlpProtoBytes};
 
+use otap_df_config::transport_headers::{TransportHeader, TransportHeaders, ValueKind};
 use otap_df_otap::pdata::{Context, OtapPdata};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +73,9 @@ mod otlp_slots {
     pub const OTLP_METRICS: u16 = 62;
     pub const OTLP_PROFILES: u16 = 63;
 }
+
+const TRANSPORT_HEADERS_SLOT: SlotId = SlotId::new(0);
+const TRANSPORT_HEADERS_MAGIC: &[u8; 7] = b"OTEHDR1";
 
 /// Convert payload type to a slot ID (direct mapping).
 ///
@@ -219,6 +223,141 @@ fn compute_schema_fingerprint(batch: &RecordBatch) -> SchemaFingerprint {
     *hash.as_bytes()
 }
 
+fn transport_headers_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![Field::new(
+        "encoded_headers",
+        DataType::Binary,
+        false,
+    )]))
+}
+
+fn transport_headers_schema_fingerprint() -> SchemaFingerprint {
+    *blake3::hash(b"ote_transport_headers_v1").as_bytes()
+}
+
+fn transport_headers_batch(
+    headers: Option<&TransportHeaders>,
+) -> Result<Option<RecordBatch>, BundleConversionError> {
+    let Some(headers) = headers.filter(|headers| !headers.is_empty()) else {
+        return Ok(None);
+    };
+    let count = u32::try_from(headers.len())
+        .map_err(|_| BundleConversionError::TransportHeaders("too many headers".into()))?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(TRANSPORT_HEADERS_MAGIC);
+    bytes.extend_from_slice(&count.to_be_bytes());
+    for header in headers.iter() {
+        let name = header.name.as_bytes();
+        let wire_name = header.wire_name.as_bytes();
+        let name_len = u32::try_from(name.len())
+            .map_err(|_| BundleConversionError::TransportHeaders("header name too long".into()))?;
+        let wire_len = u32::try_from(wire_name.len()).map_err(|_| {
+            BundleConversionError::TransportHeaders("wire header name too long".into())
+        })?;
+        let value_len = u32::try_from(header.value.len())
+            .map_err(|_| BundleConversionError::TransportHeaders("header value too long".into()))?;
+        bytes.extend_from_slice(&name_len.to_be_bytes());
+        bytes.extend_from_slice(&wire_len.to_be_bytes());
+        bytes.extend_from_slice(&value_len.to_be_bytes());
+        bytes.push(match header.value_kind {
+            ValueKind::Text => 0,
+            ValueKind::Binary => 1,
+        });
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(wire_name);
+        bytes.extend_from_slice(&header.value);
+    }
+    let len = i32::try_from(bytes.len()).map_err(|_| {
+        BundleConversionError::TransportHeaders("encoded headers exceed Arrow binary bounds".into())
+    })?;
+    let data_buffer = Buffer::from(bytes);
+    let offsets = OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, len]));
+    let binary_array = BinaryArray::new(offsets, data_buffer, None);
+    let batch = RecordBatch::try_new(transport_headers_schema(), vec![Arc::new(binary_array)])
+        .map_err(|error| BundleConversionError::RecordBatchCreationError(error.to_string()))?;
+    Ok(Some(batch))
+}
+
+fn extract_transport_headers(
+    payloads: &HashMap<SlotId, RecordBatch>,
+) -> Result<Option<TransportHeaders>, BundleConversionError> {
+    let Some(batch) = payloads.get(&TRANSPORT_HEADERS_SLOT) else {
+        return Ok(None);
+    };
+    if batch.num_columns() != 1 || batch.num_rows() != 1 {
+        return Err(BundleConversionError::TransportHeaders(
+            "reserved slot must contain one binary value".into(),
+        ));
+    }
+    let array = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| {
+            BundleConversionError::TransportHeaders(
+                "reserved slot does not contain a BinaryArray".into(),
+            )
+        })?;
+    let mut input = array.value(0);
+    if !input.starts_with(TRANSPORT_HEADERS_MAGIC) {
+        return Err(BundleConversionError::TransportHeaders(
+            "encoding magic is invalid".into(),
+        ));
+    }
+    input = &input[TRANSPORT_HEADERS_MAGIC.len()..];
+    let count = take_u32(&mut input)? as usize;
+    let mut headers = TransportHeaders::with_capacity(count);
+    for _ in 0..count {
+        let name_len = take_u32(&mut input)? as usize;
+        let wire_len = take_u32(&mut input)? as usize;
+        let value_len = take_u32(&mut input)? as usize;
+        let kind = take_bytes(&mut input, 1)?[0];
+        let name = String::from_utf8(take_bytes(&mut input, name_len)?.to_vec())
+            .map_err(|_| BundleConversionError::TransportHeaders("name is not UTF-8".into()))?;
+        let wire_name =
+            String::from_utf8(take_bytes(&mut input, wire_len)?.to_vec()).map_err(|_| {
+                BundleConversionError::TransportHeaders("wire name is not UTF-8".into())
+            })?;
+        let value = take_bytes(&mut input, value_len)?.to_vec();
+        let header = match kind {
+            0 => TransportHeader::text(name, wire_name, value),
+            1 => TransportHeader::binary(name, wire_name, value),
+            _ => {
+                return Err(BundleConversionError::TransportHeaders(
+                    "unknown header value kind".into(),
+                ));
+            }
+        };
+        headers.push(header);
+    }
+    if !input.is_empty() {
+        return Err(BundleConversionError::TransportHeaders(
+            "trailing bytes in encoding".into(),
+        ));
+    }
+    Ok(Some(headers))
+}
+
+fn take_u32(input: &mut &[u8]) -> Result<u32, BundleConversionError> {
+    let bytes = take_bytes(input, 4)?;
+    Ok(u32::from_be_bytes(
+        bytes
+            .try_into()
+            .expect("take_bytes returned exactly four bytes"),
+    ))
+}
+
+fn take_bytes<'a>(input: &mut &'a [u8], len: usize) -> Result<&'a [u8], BundleConversionError> {
+    if input.len() < len {
+        return Err(BundleConversionError::TransportHeaders(
+            "truncated encoding".into(),
+        ));
+    }
+    let (value, remaining) = input.split_at(len);
+    *input = remaining;
+    Ok(value)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // OtapRecordBundleAdapter
 // ─────────────────────────────────────────────────────────────────────────────
@@ -235,25 +374,44 @@ pub struct OtapRecordBundleAdapter {
     descriptor: BundleDescriptor,
     /// Ingestion timestamp
     ingestion_time: SystemTime,
+    transport_headers: Option<RecordBatch>,
 }
 
 impl OtapRecordBundleAdapter {
     /// Create a new adapter for the given OtapArrowRecords.
+    #[cfg(test)]
     #[must_use]
     pub fn new(records: OtapArrowRecords) -> Self {
+        Self::new_with_transport_headers(records, None).unwrap_or_else(|(error, _records)| {
+            panic!("empty transport-header encoding is infallible: {error}")
+        })
+    }
+
+    /// Create an adapter and persist request-scoped transport headers in a
+    /// reserved Quiver slot so retry after process restart retains producer
+    /// identity coordinates.
+    pub fn new_with_transport_headers(
+        records: OtapArrowRecords,
+        headers: Option<&TransportHeaders>,
+    ) -> Result<Self, (BundleConversionError, OtapArrowRecords)> {
         let signal_type = match &records {
             OtapArrowRecords::Logs(_) => SignalType::Logs,
             OtapArrowRecords::Traces(_) => SignalType::Traces,
             OtapArrowRecords::Metrics(_) => SignalType::Metrics,
             OtapArrowRecords::Profiles(_) => SignalType::Profiles,
         };
-        let descriptor = Self::build_descriptor(&records, signal_type);
-        Self {
+        let transport_headers = match transport_headers_batch(headers) {
+            Ok(headers) => headers,
+            Err(error) => return Err((error, records)),
+        };
+        let descriptor = Self::build_descriptor(&records, signal_type, transport_headers.is_some());
+        Ok(Self {
             records,
             signal_type,
             descriptor,
             ingestion_time: SystemTime::now(),
-        }
+            transport_headers,
+        })
     }
 
     /// Consume the adapter and return the original OtapArrowRecords.
@@ -266,8 +424,18 @@ impl OtapRecordBundleAdapter {
     }
 
     /// Build the bundle descriptor from the OTAP payload.
-    fn build_descriptor(records: &OtapArrowRecords, signal_type: SignalType) -> BundleDescriptor {
+    fn build_descriptor(
+        records: &OtapArrowRecords,
+        signal_type: SignalType,
+        has_transport_headers: bool,
+    ) -> BundleDescriptor {
         let mut slot_descriptors = Vec::new();
+        if has_transport_headers {
+            slot_descriptors.push(SlotDescriptor::new(
+                TRANSPORT_HEADERS_SLOT,
+                "TransportHeaders",
+            ));
+        }
 
         for payload_type in records.allowed_payload_types() {
             if records.get(*payload_type).is_some() {
@@ -293,6 +461,13 @@ impl RecordBundle for OtapRecordBundleAdapter {
     }
 
     fn payload(&self, slot: SlotId) -> Option<PayloadRef<'_>> {
+        if slot == TRANSPORT_HEADERS_SLOT {
+            let batch = self.transport_headers.as_ref()?;
+            return Some(PayloadRef {
+                schema_fingerprint: transport_headers_schema_fingerprint(),
+                batch,
+            });
+        }
         // Get the payload type from the slot ID
         let payload_type = slot_to_payload_type(slot)?;
 
@@ -340,6 +515,7 @@ pub struct OtlpBytesAdapter {
     /// format without full deserialization, to avoid repeated O(n) scans
     /// on the hot path).
     cached_item_count: u64,
+    transport_headers: Option<RecordBatch>,
 }
 
 impl OtlpBytesAdapter {
@@ -349,7 +525,16 @@ impl OtlpBytesAdapter {
     ///
     /// Returns the original bytes along with the error if the Arrow RecordBatch
     /// cannot be created, allowing the caller to NACK without cloning.
+    #[cfg(test)]
     pub fn new(bytes: OtlpProtoBytes) -> Result<Self, (BundleConversionError, OtlpProtoBytes)> {
+        Self::new_with_transport_headers(bytes, None)
+    }
+
+    /// Create an opaque OTLP adapter with durable request-scoped headers.
+    pub fn new_with_transport_headers(
+        bytes: OtlpProtoBytes,
+        headers: Option<&TransportHeaders>,
+    ) -> Result<Self, (BundleConversionError, OtlpProtoBytes)> {
         let signal_type = match &bytes {
             OtlpProtoBytes::ExportLogsRequest(_) => SignalType::Logs,
             OtlpProtoBytes::ExportMetricsRequest(_) => SignalType::Metrics,
@@ -384,10 +569,18 @@ impl OtlpBytesAdapter {
         };
 
         let slot_id = to_otlp_slot_id(signal_type);
-        let descriptor = BundleDescriptor::new(vec![SlotDescriptor::new(
-            slot_id,
-            otlp_slot_label(signal_type),
-        )]);
+        let transport_headers = match transport_headers_batch(headers) {
+            Ok(headers) => headers,
+            Err(error) => return Err((error, bytes)),
+        };
+        let mut slots = vec![SlotDescriptor::new(slot_id, otlp_slot_label(signal_type))];
+        if transport_headers.is_some() {
+            slots.insert(
+                0,
+                SlotDescriptor::new(TRANSPORT_HEADERS_SLOT, "TransportHeaders"),
+            );
+        }
+        let descriptor = BundleDescriptor::new(slots);
 
         // Compute item count once up front. The wire-format scan in
         // num_items() traverses the protobuf structure without full
@@ -402,6 +595,7 @@ impl OtlpBytesAdapter {
             descriptor,
             ingestion_time: SystemTime::now(),
             cached_item_count,
+            transport_headers,
         })
     }
 
@@ -431,6 +625,13 @@ impl RecordBundle for OtlpBytesAdapter {
     }
 
     fn payload(&self, slot: SlotId) -> Option<PayloadRef<'_>> {
+        if slot == TRANSPORT_HEADERS_SLOT {
+            let batch = self.transport_headers.as_ref()?;
+            return Some(PayloadRef {
+                schema_fingerprint: transport_headers_schema_fingerprint(),
+                batch,
+            });
+        }
         // Check if this is our OTLP slot
         let slot_signal_type = is_otlp_slot(slot)?;
         if slot_signal_type != self.signal_type {
@@ -467,6 +668,9 @@ pub enum BundleConversionError {
     /// Failed to create Arrow RecordBatch for OTLP storage.
     #[error("failed to create OTLP storage batch: {0}")]
     RecordBatchCreationError(String),
+    /// Durable transport-header metadata was malformed or exceeded bounds.
+    #[error("invalid durable transport headers: {0}")]
+    TransportHeaders(String),
 }
 
 /// Check if the bundle contains an OTLP opaque slot.
@@ -535,11 +739,17 @@ pub fn convert_bundle_to_pdata(
         return Err(BundleConversionError::EmptyBundle);
     }
 
+    let transport_headers = extract_transport_headers(payloads)?;
+
     // First, check if this is an OTLP opaque bundle
     if let Some((signal_type, batch)) = find_otlp_slot(payloads) {
         let otlp_bytes = extract_otlp_bytes(signal_type, batch)?;
         let payload = OtapPayload::OtlpBytes(otlp_bytes);
-        return Ok(OtapPdata::new(Context::default(), payload));
+        let mut pdata = OtapPdata::new(Context::default(), payload);
+        if let Some(headers) = transport_headers {
+            pdata.set_transport_headers(headers);
+        }
+        return Ok(pdata);
     }
 
     // Otherwise, it's an Arrow-format bundle
@@ -555,7 +765,11 @@ pub fn convert_bundle_to_pdata(
 
     // Wrap in OtapPayload and OtapPdata
     let payload = OtapPayload::OtapArrowRecords(records);
-    Ok(OtapPdata::new(Context::default(), payload))
+    let mut pdata = OtapPdata::new(Context::default(), payload);
+    if let Some(headers) = transport_headers {
+        pdata.set_transport_headers(headers);
+    }
+    Ok(pdata)
 }
 
 fn create_records<T>(
@@ -712,6 +926,66 @@ mod tests {
         let spans_slot = to_slot_id(SignalType::Traces, ArrowPayloadType::Spans);
         let payload = adapter.payload(spans_slot);
         assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_transport_headers_survive_bundle_roundtrip() {
+        let records = OtapArrowRecords::Logs(logs!((Logs, ("id", UInt16, vec![1u16, 2, 3]))));
+        let mut headers = TransportHeaders::new();
+        headers.push(TransportHeader::text(
+            "ote-producer-id",
+            "OTE-Producer-Id",
+            b"tenant-a/synthetic",
+        ));
+        headers.push(TransportHeader::binary(
+            "ote-producer-sequence-bin",
+            "OTE-Producer-Sequence-Bin",
+            [0, 1, 2, 255],
+        ));
+
+        let adapter =
+            OtapRecordBundleAdapter::new_with_transport_headers(records, Some(&headers)).unwrap();
+        assert!(adapter.descriptor().get(TRANSPORT_HEADERS_SLOT).is_some());
+
+        let recovered_payloads = adapter
+            .descriptor()
+            .slots
+            .iter()
+            .filter_map(|slot| {
+                adapter
+                    .payload(slot.id)
+                    .map(|payload| (slot.id, payload.batch.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        let recovered = extract_transport_headers(&recovered_payloads)
+            .unwrap()
+            .expect("headers should be present");
+
+        assert_eq!(recovered.len(), 2);
+        for (actual, expected) in recovered.iter().zip(headers.iter()) {
+            assert_eq!(actual.name, expected.name);
+            assert_eq!(actual.wire_name, expected.wire_name);
+            assert_eq!(actual.value, expected.value);
+            assert_eq!(actual.value_kind, expected.value_kind);
+        }
+        assert_eq!(
+            determine_signal_type(&recovered_payloads).unwrap(),
+            SignalType::Logs
+        );
+    }
+
+    #[test]
+    fn test_transport_header_decoder_rejects_truncated_payload() {
+        let binary_array = BinaryArray::from(vec![TRANSPORT_HEADERS_MAGIC.as_slice()]);
+        let batch =
+            RecordBatch::try_new(transport_headers_schema(), vec![Arc::new(binary_array)]).unwrap();
+        let payloads = HashMap::from([(TRANSPORT_HEADERS_SLOT, batch)]);
+
+        assert!(matches!(
+            extract_transport_headers(&payloads),
+            Err(BundleConversionError::TransportHeaders(message))
+                if message == "truncated encoding"
+        ));
     }
 
     #[test]
