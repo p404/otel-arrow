@@ -6650,6 +6650,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "flate2",
+ "fluke-hpack",
  "futures",
  "http",
  "http-body-util",

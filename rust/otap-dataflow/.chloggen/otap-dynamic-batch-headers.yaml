@@ -1,0 +1,5 @@
+change_type: enhancement
+component: otap
+note: "Preserve per-batch OTAP headers through receiver and exporter pipeline contexts."
+issues: []
+subtext: "This keeps stable producer identity, epoch, and sequence coordinates intact across deterministic routing."

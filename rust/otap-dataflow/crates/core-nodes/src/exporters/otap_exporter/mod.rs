@@ -923,6 +923,7 @@ fn create_req_stream(
         let mut producer = Producer::new_with_options(ProducerOptions {
             ipc_compression
         });
+        let mut header_encoder = fluke_hpack::Encoder::new();
 
         // send the first batch
         let encode_start = Instant::now();
@@ -931,7 +932,8 @@ fn create_req_stream(
             elapsed_nanos(encode_start),
         ));
         match bar_result {
-            Ok(bar) => {
+            Ok(mut bar) => {
+                bar.headers = encode_batch_headers(&mut header_encoder, &first_pdata);
                 let correlation_depth =
                     correlation_tx.max_capacity() - correlation_tx.capacity();
                 let correlation_start = Instant::now();
@@ -974,7 +976,8 @@ fn create_req_stream(
                 elapsed_nanos(encode_start),
             ));
             match bar_result {
-                Ok(bar) => {
+                Ok(mut bar) => {
+                    bar.headers = encode_batch_headers(&mut header_encoder, &pdata);
                     let correlation_depth =
                         correlation_tx.max_capacity() - correlation_tx.capacity();
                     let correlation_start = Instant::now();
@@ -1006,6 +1009,17 @@ fn create_req_stream(
             }
         }
     }
+}
+
+fn encode_batch_headers(encoder: &mut fluke_hpack::Encoder<'_>, pdata: &OtapPdata) -> Vec<u8> {
+    let Some(headers) = pdata.transport_headers() else {
+        return Vec::new();
+    };
+    encoder.encode(
+        headers
+            .iter()
+            .map(|header| (header.wire_name.as_bytes(), header.value.as_slice())),
+    )
 }
 
 async fn handle_res_stream(
@@ -1152,6 +1166,7 @@ async fn fail_correlated_pdata(
 
 #[cfg(test)]
 mod tests {
+    use super::encode_batch_headers;
     use crate::exporters::otap_exporter::ExportLatencyWindow;
     use crate::exporters::otap_exporter::OTAP_EXPORTER_URN;
     use crate::exporters::otap_exporter::OTAPExporter;
@@ -1161,6 +1176,43 @@ mod tests {
     };
     use otap_df_otap::pdata::OtapPdata;
     use secrecy::ExposeSecret;
+
+    #[test]
+    fn encodes_dynamic_otap_batch_headers_from_pdata_context() {
+        use otap_df_config::transport_headers::{TransportHeader, TransportHeaders};
+        use otap_df_pdata::OtapPayload;
+
+        let mut headers = TransportHeaders::new();
+        headers.push(TransportHeader::text(
+            "ote-producer-id",
+            "ote-producer-id",
+            b"tenant-a/source-7".to_vec(),
+        ));
+        headers.push(TransportHeader::text(
+            "ote-producer-sequence",
+            "ote-producer-sequence",
+            b"42".to_vec(),
+        ));
+        let pdata = OtapPdata::new_todo_context(OtapPayload::empty(SignalType::Logs))
+            .with_transport_headers(headers);
+        let mut encoder = fluke_hpack::Encoder::new();
+        let encoded = encode_batch_headers(&mut encoder, &pdata);
+        let mut decoded = Vec::new();
+
+        fluke_hpack::Decoder::new()
+            .decode_with_cb(&encoded, |name, value| {
+                decoded.push((name.into_owned(), value.into_owned()));
+            })
+            .expect("encoded batch headers should decode");
+
+        assert_eq!(
+            decoded,
+            vec![
+                (b"ote-producer-id".to_vec(), b"tenant-a/source-7".to_vec()),
+                (b"ote-producer-sequence".to_vec(), b"42".to_vec()),
+            ]
+        );
+    }
 
     use otap_df_config::SignalType;
     use otap_df_config::node::NodeUserConfig;

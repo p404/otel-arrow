@@ -14,6 +14,10 @@ The OTAP receiver accepts OTAP Arrow streams over gRPC and forwards received
 payloads into the pipeline as `OtapPdata`. It can wait for immediate downstream
 ACK/NACK outcomes before responding to the client.
 
+Per-batch HPACK headers carried by `BatchArrowRecords` are decoded into the
+pipeline transport-header context. This preserves stable producer identity,
+epoch, and sequence metadata through routing and direct OTAP export.
+
 ## Getting Started
 
 Listen for OTAP Arrow stream clients on a gRPC address:

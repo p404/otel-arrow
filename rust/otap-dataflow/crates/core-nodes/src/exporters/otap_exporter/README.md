@@ -14,6 +14,11 @@ The OTAP exporter sends OTAP Arrow payloads over gRPC streams to an
 OTAP-compatible receiver. It maintains independent per-signal stream tasks and
 correlates stream responses back to upstream ACK/NACK handling.
 
+Transport headers attached to each pipeline message are HPACK-encoded into
+that message's `BatchArrowRecords.headers`. They are distinct from the optional
+static gRPC stream headers and allow producer identity and exact-replay
+coordinates to vary per batch.
+
 ## Getting Started
 
 Point the exporter at an OTAP-compatible gRPC endpoint:

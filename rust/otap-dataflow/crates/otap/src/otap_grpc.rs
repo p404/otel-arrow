@@ -11,6 +11,7 @@
 //! ToDo: Change how channel sizes are handled? Currently defined when creating otap_receiver -> passing channel size to the ServiceImpl
 
 use crate::pdata::{Context, OtapPdata};
+use crate::transport_headers::{TransportHeader, TransportHeaders};
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt as FuturesStreamExt};
@@ -348,6 +349,7 @@ async fn handle_stream<T, F>(
     F: Fn(T) -> OtapArrowRecords + Copy + Send + 'static,
 {
     let mut consumer = Consumer::default();
+    let mut header_decoder = fluke_hpack::Decoder::new();
     let max_pending = settings.effective_max_concurrent_requests_per_stream();
     let mut pending = FuturesUnordered::<PendingResponseFuture>::new();
 
@@ -394,6 +396,7 @@ async fn handle_stream<T, F>(
                 match accept_data::<T, F>(
                     otap_batch,
                     &mut consumer,
+                    &mut header_decoder,
                     batch,
                     &effect_handler,
                     state.clone(),
@@ -465,6 +468,7 @@ async fn reject_open_stream_for_memory_pressure(
 async fn accept_data<T: OtapBatchStore, F>(
     otap_batch: F,
     consumer: &mut Consumer,
+    header_decoder: &mut fluke_hpack::Decoder<'_>,
     mut batch: BatchArrowRecords,
     effect_handler: &shared::EffectHandler<OtapPdata>,
     state: Option<SharedState>,
@@ -500,6 +504,9 @@ where
         return Ok(None);
     }
 
+    let transport_headers = decode_batch_headers(header_decoder, &batch.headers).map_err(|e| {
+        otel_error!("otap.batch.headers_decode_failed", error = %e, message = "Error decoding OTAP batch headers. Closing stream");
+    })?;
     let batch = consumer.consume_bar(&mut batch).map_err(|e| {
         otel_error!("otap.batch.decode_failed", error = ?e, message = "Error decoding OTAP Batch. Closing stream");
     })?;
@@ -510,6 +517,9 @@ where
     let otap_batch_as_otap_arrow_records = otap_batch(batch);
     let mut otap_pdata =
         OtapPdata::new(Context::default(), otap_batch_as_otap_arrow_records.into());
+    if !transport_headers.is_empty() {
+        otap_pdata.set_transport_headers(transport_headers);
+    }
     if let Some(addr) = peer_addr {
         otap_pdata.set_peer_addr(addr);
     }
@@ -601,6 +611,29 @@ where
     Ok(None)
 }
 
+fn decode_batch_headers(
+    decoder: &mut fluke_hpack::Decoder<'_>,
+    encoded: &[u8],
+) -> Result<TransportHeaders, String> {
+    let mut headers = TransportHeaders::new();
+    if encoded.is_empty() {
+        return Ok(headers);
+    }
+    decoder
+        .decode_with_cb(encoded, |name, value| {
+            let wire_name = String::from_utf8_lossy(name.as_ref()).into_owned();
+            let normalized = wire_name.to_ascii_lowercase();
+            let header = if normalized.ends_with("-bin") {
+                TransportHeader::binary(normalized, wire_name, value.into_owned())
+            } else {
+                TransportHeader::text(normalized, wire_name, value.into_owned())
+            };
+            headers.push(header);
+        })
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(headers)
+}
+
 async fn wait_for_pending_response(
     batch_id: i64,
     _cancel_guard: otlp::server::SlotGuard,
@@ -665,6 +698,52 @@ mod tests {
         fn record_rejection(&self) {
             let _ = self.calls.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn batch_headers_decode_with_stream_hpack_state() {
+        let mut encoder = fluke_hpack::Encoder::new();
+        let first = encoder.encode([
+            (
+                b"ote-producer-id".as_slice(),
+                b"tenant-a/source-7".as_slice(),
+            ),
+            (b"ote-producer-epoch".as_slice(), b"4".as_slice()),
+            (b"ote-producer-sequence".as_slice(), b"41".as_slice()),
+        ]);
+        let second = encoder.encode([
+            (
+                b"ote-producer-id".as_slice(),
+                b"tenant-a/source-7".as_slice(),
+            ),
+            (b"ote-producer-epoch".as_slice(), b"4".as_slice()),
+            (b"ote-producer-sequence".as_slice(), b"42".as_slice()),
+        ]);
+        let mut decoder = fluke_hpack::Decoder::new();
+
+        let first = decode_batch_headers(&mut decoder, &first).expect("first header block");
+        let second = decode_batch_headers(&mut decoder, &second).expect("second header block");
+
+        assert_eq!(
+            first
+                .find_by_name("ote-producer-sequence")
+                .next()
+                .unwrap()
+                .value,
+            b"41"
+        );
+        assert_eq!(
+            second.find_by_name("ote-producer-id").next().unwrap().value,
+            b"tenant-a/source-7"
+        );
+        assert_eq!(
+            second
+                .find_by_name("ote-producer-sequence")
+                .next()
+                .unwrap()
+                .value,
+            b"42"
+        );
     }
 
     #[tokio::test]
