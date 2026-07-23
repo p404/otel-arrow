@@ -256,6 +256,16 @@ impl OTAPExporter {
                     .notify_nack(NackMsg::new("export failed", pdata))
                     .await?;
             }
+            PDataMetricsUpdate::IncRefused(signal_type, pdata, response_duration_ns, reason) => {
+                self.async_metrics
+                    .export_rpc_duration_ns
+                    .record(response_duration_ns);
+                self.export_latency_window.record(response_duration_ns);
+                self.pdata_metrics.inc_failed(signal_type);
+                effect_handler
+                    .notify_nack(NackMsg::new_permanent(reason, pdata))
+                    .await?;
+            }
             PDataMetricsUpdate::IncExported(signal_type, pdata, response_duration_ns) => {
                 self.async_metrics
                     .export_rpc_duration_ns
@@ -761,6 +771,7 @@ impl StreamingArrowService for ArrowProfilesServiceClient<Channel> {
 enum PDataMetricsUpdate {
     IncExported(SignalType, OtapPdata, f64),
     IncFailed(SignalType, OtapPdata, Option<f64>),
+    IncRefused(SignalType, OtapPdata, f64, String),
     RecordStreamEncodeDuration(f64),
     RecordCorrelationEnqueue { duration_ns: f64, depth: usize },
     RecordResponseWait { duration_ns: f64, inflight: usize },
@@ -1057,13 +1068,32 @@ async fn handle_res_stream(
                                         elapsed_nanos(correlated.sent_at),
                                     ))
                                     .await;
-                            } else {
+                            } else if batch_status_is_permanent(&status) {
                                 otel_warn!(
                                     "otap_exporter.batch_status_failed",
                                     batch_id = status.batch_id,
                                     status_code = status.status_code,
                                     status_message = status.status_message.as_str(),
                                     message = "OTAP server rejected exported batch"
+                                );
+                                _ = pdata_metrics_tx
+                                    .send(PDataMetricsUpdate::IncRefused(
+                                        signal_type,
+                                        correlated.pdata,
+                                        elapsed_nanos(correlated.sent_at),
+                                        format!(
+                                            "OTAP server permanently rejected batch: {}",
+                                            status.status_message
+                                        ),
+                                    ))
+                                    .await;
+                            } else {
+                                otel_warn!(
+                                    "otap_exporter.batch_status_failed",
+                                    batch_id = status.batch_id,
+                                    status_code = status.status_code,
+                                    status_message = status.status_message.as_str(),
+                                    message = "OTAP server transiently rejected exported batch"
                                 );
                                 _ = pdata_metrics_tx
                                     .send(PDataMetricsUpdate::IncFailed(
@@ -1133,6 +1163,16 @@ const fn batch_status_is_ok(status: &BatchStatus) -> bool {
     status.status_code == StatusCode::Ok as i32
 }
 
+const fn batch_status_is_permanent(status: &BatchStatus) -> bool {
+    matches!(
+        status.status_code,
+        code if code == StatusCode::InvalidArgument as i32
+            || code == StatusCode::PermissionDenied as i32
+            || code == StatusCode::Internal as i32
+            || code == StatusCode::Unauthenticated as i32
+    )
+}
+
 fn drain_correlation_rx(
     correlation_rx: &mut Receiver<CorrelatedPdata>,
     correlated_by_batch_id: &mut HashMap<i64, CorrelatedPdata>,
@@ -1166,7 +1206,7 @@ async fn fail_correlated_pdata(
 
 #[cfg(test)]
 mod tests {
-    use super::encode_batch_headers;
+    use super::{batch_status_is_permanent, encode_batch_headers};
     use crate::exporters::otap_exporter::ExportLatencyWindow;
     use crate::exporters::otap_exporter::OTAP_EXPORTER_URN;
     use crate::exporters::otap_exporter::OTAPExporter;
@@ -1176,6 +1216,31 @@ mod tests {
     };
     use otap_df_otap::pdata::OtapPdata;
     use secrecy::ExposeSecret;
+
+    #[test]
+    fn classifies_otap_batch_status_retryability() {
+        let status = |status_code| BatchStatus {
+            batch_id: 1,
+            status_code,
+            status_message: String::new(),
+        };
+
+        for code in [
+            StatusCode::InvalidArgument,
+            StatusCode::PermissionDenied,
+            StatusCode::Internal,
+            StatusCode::Unauthenticated,
+        ] {
+            assert!(batch_status_is_permanent(&status(code as i32)));
+        }
+        for code in [
+            StatusCode::Unavailable,
+            StatusCode::ResourceExhausted,
+            StatusCode::Aborted,
+        ] {
+            assert!(!batch_status_is_permanent(&status(code as i32)));
+        }
+    }
 
     #[test]
     fn encodes_dynamic_otap_batch_headers_from_pdata_context() {
