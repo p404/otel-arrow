@@ -18,6 +18,11 @@ This processor is useful when one pipeline needs to split traffic by a content
 dimension such as namespace, service, environment, or any other resource
 attribute.
 
+It can also rendezvous-hash a stable resource attribute across route keys. In
+that mode, route keys are stable shard identities and route values are output
+ports. Adding or removing a shard remaps only the keys whose rendezvous winner
+changes.
+
 ## Getting Started
 
 Declare the output ports and route values from a resource attribute to those
@@ -36,6 +41,22 @@ config:
     frontend: frontend_pipeline
     backend: backend_pipeline
   default_output: fallback
+```
+
+For deterministic shard routing:
+
+```yaml
+type: processor:content_router
+outputs: [shard_0, shard_1, shard_2, shard_3, shard_4]
+config:
+  routing_key:
+    rendezvous_transport_header: ote-producer-id
+  routes:
+    shard-0: shard_0
+    shard-1: shard_1
+    shard-2: shard_2
+    shard-3: shard_3
+    shard-4: shard_4
 ```
 
 ## Configuration
@@ -60,7 +81,12 @@ config:
 
 Configuration fields:
 
-- `routing_key.resource_attribute`: resource attribute used as the route key.
+- `routing_key.resource_attribute`: resource attribute used for exact matching.
+- `routing_key.rendezvous_resource_attribute`: resource attribute hashed
+  against every configured route key; the highest-scoring route wins.
+- `routing_key.rendezvous_transport_header`: captured transport header hashed
+  with the same algorithm. This is the preferred form when an upstream
+  producer identity must remain unchanged across exact retries.
 - `routes`: map from route-key values to output port names.
 - `default_output`: optional output port for messages that do not match a
   configured route.
@@ -191,6 +217,8 @@ runtime metric sets may also be attached by the pipeline telemetry policy.
 ## Limits
 
 - Route keys currently come from resource attributes.
+- Rendezvous routing requires the upstream receiver to preserve one stable
+  resource attribute or captured transport header across retries.
 - `routes` must not be empty.
 - Route destinations and `default_output`, when declared, must match node
   output ports.

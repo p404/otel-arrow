@@ -1,0 +1,31 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Root-context variant of rust/otap-dataflow/Dockerfile for builders such as
+# Altiro that intentionally expose one hermetic build context.
+FROM --platform=$BUILDPLATFORM docker.io/rust:1.97@sha256:44637ff22d0a6571a221bfaf137849711ad02ff4723dbb4736e297538f6a3e60 AS dataflow-build
+WORKDIR /build
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+
+RUN apt-get update && apt-get install -y protobuf-compiler
+
+COPY proto/opentelemetry/proto /build/proto/opentelemetry/proto
+COPY proto/opentelemetry-proto /build/proto/opentelemetry-proto
+COPY rust/experimental /build/rust/experimental
+COPY THIRD_PARTY_NOTICES.txt /build/THIRD_PARTY_NOTICES.txt
+COPY rust/otap-dataflow /build/rust/dataflow
+
+WORKDIR /build/rust/dataflow
+ARG RUSTFLAGS="-C target-cpu=native"
+ENV RUSTFLAGS=${RUSTFLAGS}
+ARG FEATURES
+ENV FEATURES=${FEATURES}
+RUN ./cross-arch-build.sh
+
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:d3cda6e91129130d7229a1806b6a73d292ef245ab032da7851907798024cefba
+LABEL maintainer="The OpenTelemetry Authors"
+WORKDIR /home/nonroot
+COPY --from=dataflow-build --chown=nonroot:nonroot /build/rust/dataflow/df_engine .
+USER nonroot
+ENTRYPOINT ["/home/nonroot/df_engine"]

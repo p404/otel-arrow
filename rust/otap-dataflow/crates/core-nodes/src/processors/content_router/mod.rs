@@ -87,10 +87,12 @@ use otap_df_otap::pdata::OtapPdata;
 use otap_df_pdata::OtapPayload;
 use otap_df_pdata::TryFromWithOptions;
 use otap_df_pdata::otlp::OtlpProtoBytes;
+use otap_df_pdata::proto::opentelemetry::collector::profiles::v1development::ExportProfilesServiceRequest;
 use otap_df_pdata::views::otap::OtapLogsView;
 use otap_df_pdata::views::otlp::bytes::logs::RawLogsData;
 use otap_df_pdata::views::otlp::bytes::metrics::RawMetricsData;
 use otap_df_pdata::views::otlp::bytes::traces::RawTraceData;
+use otap_df_pdata::views::otlp::proto::resource::ObjResource;
 use otap_df_pdata_views::views::common::{AnyValueView, AttributeView, ValueType};
 use otap_df_pdata_views::views::logs::{LogsDataView, ResourceLogsView};
 use otap_df_pdata_views::views::metrics::{MetricsView, ResourceMetricsView};
@@ -100,6 +102,7 @@ use otap_df_telemetry::instrument::Counter;
 use otap_df_telemetry::metrics::MetricSet;
 
 use otap_df_telemetry_macros::metric_set;
+use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -123,12 +126,28 @@ pub const CONTENT_ROUTER_URN: &str = "urn:otel:processor:content_router";
 pub enum RoutingKeyExpr {
     /// Extract the routing value from a resource attribute with the given key.
     ResourceAttribute(String),
+    /// Rendezvous-hash a resource attribute over the configured route keys.
+    ///
+    /// Route keys are stable shard identities and route values are output
+    /// ports. This minimizes remapping when the configured shard set changes.
+    RendezvousResourceAttribute(String),
+    /// Rendezvous-hash one captured transport header over route keys.
+    ///
+    /// This is intended for stable producer identities that arrive as OTLP or
+    /// OTAP metadata and must survive retries without modifying payloads.
+    RendezvousTransportHeader(String),
 }
 
 impl std::fmt::Display for RoutingKeyExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ResourceAttribute(key) => write!(f, "resource_attribute({})", key),
+            Self::RendezvousResourceAttribute(key) => {
+                write!(f, "rendezvous_resource_attribute({})", key)
+            }
+            Self::RendezvousTransportHeader(key) => {
+                write!(f, "rendezvous_transport_header({})", key)
+            }
         }
     }
 }
@@ -205,7 +224,9 @@ impl ContentRouterConfig {
     /// destination and `default_output` refers to a declared node output port.
     fn validate(&self, declared_outputs: &[PortName]) -> Result<(), ConfigError> {
         match &self.routing_key {
-            RoutingKeyExpr::ResourceAttribute(key) => {
+            RoutingKeyExpr::ResourceAttribute(key)
+            | RoutingKeyExpr::RendezvousResourceAttribute(key)
+            | RoutingKeyExpr::RendezvousTransportHeader(key) => {
                 if key.trim().is_empty() {
                     return Err(ConfigError::InvalidUserConfig {
                         error: "routing_key.resource_attribute must not be empty".to_string(),
@@ -360,7 +381,9 @@ impl ContentRouter {
     /// Returns the resolved port name or None if the key is missing/not a route match.
     fn extract_route_from_resource<R: ResourceView>(&self, resource: &R) -> RouteResolution {
         let key_bytes = match &self.routing_key {
-            RoutingKeyExpr::ResourceAttribute(key) => key.as_bytes(),
+            RoutingKeyExpr::ResourceAttribute(key)
+            | RoutingKeyExpr::RendezvousResourceAttribute(key) => key.as_bytes(),
+            RoutingKeyExpr::RendezvousTransportHeader(_) => return RouteResolution::MissingKey,
         };
 
         for attr in resource.attributes() {
@@ -393,13 +416,59 @@ impl ContentRouter {
                     Cow::Owned(str_value.to_lowercase())
                 };
 
-                if let Some(port) = self.routes.get(lookup.as_ref()) {
-                    return RouteResolution::Matched(port.clone());
+                match &self.routing_key {
+                    RoutingKeyExpr::ResourceAttribute(_) => {
+                        if let Some(port) = self.routes.get(lookup.as_ref()) {
+                            return RouteResolution::Matched(port.clone());
+                        }
+                    }
+                    RoutingKeyExpr::RendezvousResourceAttribute(_) => {
+                        return self.rendezvous_route(lookup.as_bytes());
+                    }
+                    RoutingKeyExpr::RendezvousTransportHeader(_) => unreachable!(),
                 }
                 return RouteResolution::NoMatch;
             }
         }
         RouteResolution::MissingKey
+    }
+
+    fn rendezvous_route(&self, key: &[u8]) -> RouteResolution {
+        self.routes
+            .iter()
+            .map(|(shard, port)| {
+                let mut candidate = Vec::with_capacity(key.len() + shard.len() + 1);
+                candidate.extend_from_slice(key);
+                candidate.push(0);
+                candidate.extend_from_slice(shard.as_bytes());
+                (xxhash_rust::xxh3::xxh3_64(&candidate), shard, port)
+            })
+            .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
+            .map_or(RouteResolution::NoMatch, |(_, _, port)| {
+                RouteResolution::Matched(port.clone())
+            })
+    }
+
+    fn resolve_transport_header_route(&self, pdata: &OtapPdata, name: &str) -> RouteResolution {
+        let Some(headers) = pdata.transport_headers() else {
+            return RouteResolution::MissingKey;
+        };
+        let mut values = headers.find_by_name(name);
+        let Some(first) = values.next() else {
+            return RouteResolution::MissingKey;
+        };
+        if values.any(|header| header.value != first.value) {
+            return RouteResolution::MixedBatch;
+        }
+        let key: Cow<'_, [u8]> = if self.case_sensitive {
+            Cow::Borrowed(&first.value)
+        } else {
+            let Ok(value) = std::str::from_utf8(&first.value) else {
+                return RouteResolution::NoMatch;
+            };
+            Cow::Owned(value.to_lowercase().into_bytes())
+        };
+        self.rendezvous_route(&key)
     }
 
     /// Folds a new resource resolution into the running accumulator.
@@ -506,8 +575,35 @@ impl ContentRouter {
         acc.unwrap_or(RouteResolution::MissingKey)
     }
 
+    /// Resolves profiles after decoding the collector request. Profiles do not
+    /// yet have a protobuf-bytes resource view, so this path uses the generated
+    /// object view while preserving the same mixed-batch behavior.
+    fn resolve_profiles_route(&self, bytes: &[u8]) -> RouteResolution {
+        let request = match ExportProfilesServiceRequest::decode(bytes) {
+            Ok(request) => request,
+            Err(_) => return RouteResolution::ConversionError,
+        };
+        let mut acc: Option<RouteResolution> = None;
+        for resource_profiles in &request.resource_profiles {
+            let resolution = resource_profiles
+                .resource
+                .as_ref()
+                .map_or(RouteResolution::MissingKey, |resource| {
+                    self.extract_route_from_resource(&ObjResource::new(resource))
+                });
+            acc = Some(Self::fold_resolution(acc, resolution));
+            if matches!(acc, Some(RouteResolution::MixedBatch)) {
+                return RouteResolution::MixedBatch;
+            }
+        }
+        acc.unwrap_or(RouteResolution::MissingKey)
+    }
+
     /// Resolves the output port for a given message payload.
     fn resolve_route(&self, pdata: &OtapPdata) -> RouteResolution {
+        if let RoutingKeyExpr::RendezvousTransportHeader(name) = &self.routing_key {
+            return self.resolve_transport_header_route(pdata, name);
+        }
         let signal_type = pdata.signal_type();
 
         match pdata.payload_ref() {
@@ -523,6 +619,9 @@ impl ContentRouter {
                 (SignalType::Traces, OtlpProtoBytes::ExportTracesRequest(bytes)) => {
                     let data = RawTraceData::new(bytes.as_ref());
                     self.resolve_traces_route(&data)
+                }
+                (SignalType::Profiles, OtlpProtoBytes::ExportProfilesRequest(bytes)) => {
+                    self.resolve_profiles_route(bytes)
                 }
                 // Defensive: signal_type/payload mismatch cannot occur for OtlpBytes
                 // since signal_type() is derived from the OtlpProtoBytes variant itself.
@@ -542,6 +641,9 @@ impl ContentRouter {
                         Ok(OtlpProtoBytes::ExportTracesRequest(bytes)) => {
                             let data = RawTraceData::new(bytes.as_ref());
                             self.resolve_traces_route(&data)
+                        }
+                        Ok(OtlpProtoBytes::ExportProfilesRequest(bytes)) => {
+                            self.resolve_profiles_route(&bytes)
                         }
                         _ => RouteResolution::ConversionError,
                     },
@@ -978,11 +1080,14 @@ pub static CONTENT_ROUTER_FACTORY: ProcessorFactory<OtapPdata> = ProcessorFactor
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use otap_df_config::transport_headers::{TransportHeader, TransportHeaders};
     use otap_df_engine::testing::{processor::TestRuntime, test_node};
     use otap_df_pdata::proto::opentelemetry::{
         collector::logs::v1::ExportLogsServiceRequest,
+        collector::profiles::v1development::ExportProfilesServiceRequest,
         common::v1::{AnyValue, InstrumentationScope, KeyValue},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs, SeverityNumber},
+        profiles::v1development::ResourceProfiles,
         resource::v1::Resource,
     };
     use prost::Message as ProstMessage;
@@ -1008,6 +1113,23 @@ mod tests {
         let mut buf = Vec::new();
         request.encode(&mut buf).unwrap();
         Bytes::from(buf)
+    }
+
+    fn create_profiles_with_resource_attr(key: &str, value: &str) -> Bytes {
+        let request = ExportProfilesServiceRequest {
+            resource_profiles: vec![ResourceProfiles {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue::new(key, AnyValue::new_string(value))],
+                    dropped_attributes_count: 0,
+                    entity_refs: vec![],
+                }),
+                scope_profiles: vec![],
+                schema_url: String::new(),
+            }],
+        };
+        let mut bytes = Vec::new();
+        request.encode(&mut bytes).unwrap();
+        Bytes::from(bytes)
     }
 
     fn create_logs_without_resource_attr() -> Bytes {
@@ -1177,6 +1299,24 @@ mod tests {
         let cfg: ContentRouterConfig = serde_json::from_value(config_json).unwrap();
         assert!(cfg.case_sensitive);
         assert!(cfg.default_output.is_none());
+    }
+
+    #[test]
+    fn test_rendezvous_config_deserialization() {
+        let config_json = json!({
+            "routing_key": { "rendezvous_resource_attribute": "ote.producer.id" },
+            "routes": {
+                "shard-0": "shard_0",
+                "shard-1": "shard_1"
+            }
+        });
+        let cfg: ContentRouterConfig = serde_json::from_value(config_json).unwrap();
+        assert!(matches!(
+            cfg.routing_key,
+            RoutingKeyExpr::RendezvousResourceAttribute(ref key) if key == "ote.producer.id"
+        ));
+        cfg.validate(&[PortName::from("shard_0"), PortName::from("shard_1")])
+            .unwrap();
     }
 
     #[test]
@@ -1376,6 +1516,95 @@ mod tests {
             RouteResolution::Matched(port) => assert_eq!(port, "tenant_a"),
             _ => panic!("expected Matched"),
         }
+    }
+
+    #[test]
+    fn rendezvous_routing_is_stable_and_only_removed_shard_keys_move() {
+        let route_for = |routes: HashMap<String, String>, producer: &str| {
+            let router = ContentRouter::new(ContentRouterConfig {
+                routing_key: RoutingKeyExpr::RendezvousResourceAttribute(
+                    "ote.producer.id".to_string(),
+                ),
+                routes,
+                default_output: None,
+                case_sensitive: true,
+                admission_policy: SelectedRouteAdmissionPolicy::default(),
+            });
+            let bytes = create_logs_with_resource_attr("ote.producer.id", producer);
+            let data = RawLogsData::new(&bytes);
+            match router.resolve_logs_route(&data) {
+                RouteResolution::Matched(port) => port.to_string(),
+                _ => panic!("expected rendezvous match"),
+            }
+        };
+        let five = (0..5)
+            .map(|shard| (format!("shard-{shard}"), format!("port-{shard}")))
+            .collect::<HashMap<_, _>>();
+        let four = (0..4)
+            .map(|shard| (format!("shard-{shard}"), format!("port-{shard}")))
+            .collect::<HashMap<_, _>>();
+        let mut selected = HashSet::new();
+        for producer in (0..256).map(|value| format!("tenant-a/logs/producer-{value}")) {
+            let before = route_for(five.clone(), &producer);
+            assert_eq!(before, route_for(five.clone(), &producer));
+            let after = route_for(four.clone(), &producer);
+            if before != "port-4" {
+                assert_eq!(after, before);
+            }
+            let _ = selected.insert(before);
+        }
+        assert_eq!(selected.len(), 5, "all five shard routes must receive keys");
+    }
+
+    #[test]
+    fn rendezvous_routes_profiles_with_the_same_resource_rule() {
+        let routes = (0..5)
+            .map(|shard| (format!("shard-{shard}"), format!("port-{shard}")))
+            .collect();
+        let router = ContentRouter::new(ContentRouterConfig {
+            routing_key: RoutingKeyExpr::RendezvousResourceAttribute("ote.producer.id".to_string()),
+            routes,
+            default_output: None,
+            case_sensitive: true,
+            admission_policy: SelectedRouteAdmissionPolicy::default(),
+        });
+        let bytes =
+            create_profiles_with_resource_attr("ote.producer.id", "tenant-a/profiles/source-7");
+        assert!(matches!(
+            router.resolve_profiles_route(&bytes),
+            RouteResolution::Matched(_)
+        ));
+    }
+
+    #[test]
+    fn rendezvous_transport_header_routes_every_signal_without_payload_mutation() {
+        let router = ContentRouter::new(ContentRouterConfig {
+            routing_key: RoutingKeyExpr::RendezvousTransportHeader("ote-producer-id".to_string()),
+            routes: (0..5)
+                .map(|shard| (format!("shard-{shard}"), format!("port-{shard}")))
+                .collect(),
+            default_output: None,
+            case_sensitive: true,
+            admission_policy: SelectedRouteAdmissionPolicy::default(),
+        });
+        let mut headers = TransportHeaders::new();
+        headers.push(TransportHeader::text(
+            "ote-producer-id",
+            "ote-producer-id",
+            b"tenant-a/source-7".to_vec(),
+        ));
+        let route = |signal| {
+            let pdata = OtapPdata::new_default(OtlpProtoBytes::empty(signal).into())
+                .with_transport_headers(headers.clone());
+            match router.resolve_route(&pdata) {
+                RouteResolution::Matched(port) => port.to_string(),
+                _ => panic!("expected transport-header rendezvous match"),
+            }
+        };
+        let expected = route(SignalType::Logs);
+        assert_eq!(route(SignalType::Metrics), expected);
+        assert_eq!(route(SignalType::Traces), expected);
+        assert_eq!(route(SignalType::Profiles), expected);
     }
 
     #[test]

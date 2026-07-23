@@ -1,0 +1,7 @@
+change_type: enhancement
+component: pipeline
+note: "Add deterministic rendezvous-hash shard routing to the content router."
+issues: [0]
+subtext: |
+  Stable resource attributes can now be mapped across named shard outputs with
+  minimal key movement when the configured shard set changes.
