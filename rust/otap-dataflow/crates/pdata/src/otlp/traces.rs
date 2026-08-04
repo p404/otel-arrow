@@ -308,6 +308,15 @@ impl TracesProtoBytesEncoder {
             .scope_arrays
             .id
             .and_then(|arr| arr.value_at(index));
+        // A `ScopeSpans` belongs to exactly one `ResourceSpans`, and a producer
+        // may reuse one scope ID across resources (Go's `otelarrow` exporter
+        // numbers scopes per distinct scope, not per resource/scope pair), so
+        // this run also ends when the resource changes. The pair is the key
+        // `init_cursor_for_root_batch` sorted the root rows by.
+        let resource_id = traces_data_arrays
+            .resource_arrays
+            .id
+            .and_then(|arr| arr.value_at(index));
         loop {
             result_buf.encode_len_delimited(SCOPE_SPANS_SPANS, |result_buf| {
                 self.encode_span(traces_data_arrays, result_buf)
@@ -321,12 +330,16 @@ impl TracesProtoBytesEncoder {
             // Safety: we've just checked above that cursor isn't finished
             let next_index = self.root_cursor.curr_index().expect("cursor not finished");
 
-            // check if we've found a new scope ID. If so, break
+            // check if we've found a new resource or scope ID. If so, break
             let next_scope_id = traces_data_arrays
                 .scope_arrays
                 .id
                 .and_then(|arr| arr.value_at(next_index));
-            if scope_id != next_scope_id {
+            let next_resource_id = traces_data_arrays
+                .resource_arrays
+                .id
+                .and_then(|arr| arr.value_at(next_index));
+            if (resource_id, scope_id) != (next_resource_id, next_scope_id) {
                 break;
             }
         }

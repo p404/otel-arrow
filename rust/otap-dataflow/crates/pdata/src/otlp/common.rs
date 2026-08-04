@@ -1066,15 +1066,18 @@ impl SortedBatchCursor {
     /// `extend attributes[...]` fills null root ids with `max + 1`, an earlier-visited scope can
     /// carry a *larger* id than a later-visited one. A purely forward cursor would then skip
     /// (permanently consume) the later, lower-id parent's child rows, silently dropping all of its
-    /// attributes. Each parent id is queried at most once per batch, so re-seeking never re-yields
-    /// rows for an already-emitted parent.
+    /// attributes.
     ///
-    /// Fast path: parents are *usually* visited in ascending id order, in which case the cursor is
-    /// already at (or before) `target`'s range and [`ChildIndexIter::next`] can scan forward to it
-    /// without a search. We therefore only pay for the `O(log n)` binary search when a *backward*
-    /// jump is required - i.e. `target` is smaller than a parent we have already passed - which is
-    /// exactly the non-monotonic case the seek exists to handle. This keeps the common,
-    /// already-sorted case at the same cost as a plain forward cursor.
+    /// The same parent id may legitimately be queried more than once per batch: one scope can be
+    /// shared by several resources, and each `Scope{Logs,Spans,Metrics}` it produces carries its
+    /// own copy of that scope's attributes. Seeking to the *start* of the equal-range rather than
+    /// trusting the cursor's position makes every such query yield the full set.
+    ///
+    /// Fast path: parents are *usually* visited in strictly ascending id order, in which case the
+    /// cursor is already at (or before) `target`'s range and [`ChildIndexIter::next`] can scan
+    /// forward to it without a search. We therefore only pay for the `O(log n)` binary search when
+    /// `target` is not strictly greater than a parent we have already passed - i.e. a backward jump
+    /// (the non-monotonic case) or a repeat of the previous parent (the shared-scope case).
     fn seek_to_parent<T: ArrowPrimitiveType>(
         &mut self,
         target: T::Native,
@@ -1082,17 +1085,16 @@ impl SortedBatchCursor {
     ) where
         T::Native: PartialOrd,
     {
-        // If the most recently consumed row's parent id is `<= target`, then `target`'s rows (if
+        // If the most recently consumed row's parent id is `< target`, then `target`'s rows (if
         // any) are at or after `curr_index`, so a forward scan suffices — no search needed. Nulls
         // (value_at == None) fall through to the search, as does the very first seek of a batch.
         if self.curr_index > 0 {
             if let Some(prev) = parent_id_col.value_at(self.sorted_indices[self.curr_index - 1]) {
-                // `target >= prev`: forward scan suffices. Incomparable values (partial_cmp ==
-                // None) fall through to the search as a safe default.
-                if matches!(
-                    target.partial_cmp(&prev),
-                    Some(Ordering::Greater | Ordering::Equal)
-                ) {
+                // `target > prev`: forward scan suffices. `target == prev` must search: the cursor
+                // sits *past* that parent's rows, and re-querying it (a scope shared by several
+                // resources) has to yield them again. Incomparable values (partial_cmp == None)
+                // fall through to the search as a safe default.
+                if matches!(target.partial_cmp(&prev), Some(Ordering::Greater)) {
                     return;
                 }
             }
@@ -1360,14 +1362,22 @@ mod test {
     use std::sync::Arc;
 
     use arrow::{
-        array::{RecordBatch, StructArray, UInt16Array},
-        datatypes::{DataType, Field, Fields, Schema, UInt16Type},
+        array::{
+            ArrayRef, DurationNanosecondArray, FixedSizeBinaryArray, RecordBatch, StringArray,
+            StructArray, TimestampNanosecondArray, UInt8Array, UInt16Array,
+        },
+        datatypes::{DataType, Field, Fields, Schema, TimeUnit, UInt16Type},
     };
 
     use crate::{
         arrays::MaybeDictArrayAccessor,
+        otap::{Logs, Metrics, OtapArrowRecords, Traces},
+        otlp::attributes::AttributeValueType,
         otlp::common::{BatchSorter, ChildIndexIter, SortedBatchCursor},
+        otlp::metrics::MetricType,
         proto::OtlpProtoMessage,
+        proto::opentelemetry::arrow::v1::ArrowPayloadType,
+        proto::opentelemetry::resource::v1::Resource,
         schema::consts,
         testing::{fixtures::*, round_trip::*},
     };
@@ -2037,5 +2047,363 @@ mod test {
             assert_eq!(b.limit(), outer, "scoped limit clamped to outer");
         });
         assert_eq!(buf.limit(), outer);
+    }
+
+    //
+    // Go-producer root grouping
+    //
+    // The Arrow layout below was captured off the wire from
+    // `opentelemetry-collector-contrib:0.157.0`'s `otelarrow` exporter (Go
+    // producer) carrying one export request with two `ResourceLogs` that share
+    // an instrumentation scope:
+    //
+    // * `resource.id` is a delta-encoded `UInt16` inside a nullable struct and
+    //   carries no encoding metadata, so eight rows arrive as
+    //   `[0,0,0,0,1,0,0,0]` and decode to `[0,0,0,0,1,1,1,1]`.
+    // * `scope.id` is `0` on every row. Go numbers scopes per *distinct scope*
+    //   rather than per `(resource, scope)` pair, so a single scope id spans
+    //   both resources.
+    // * there is no root `id` column at all.
+    //
+    // A `ScopeX` message lives inside exactly one `ResourceX` message, so the
+    // run of root rows that share a `ScopeX` must end when *either* the scope
+    // id or the resource id changes — the same composite key the root cursor
+    // is sorted by. Ending it on the scope id alone folds every row into the
+    // first resource.
+    //
+
+    fn id_struct_fields() -> Fields {
+        Fields::from(vec![Field::new(consts::ID, DataType::UInt16, true)])
+    }
+
+    /// `resource`/`scope` struct columns in Go's transport-optimized form:
+    /// `resource.id` delta encoded, `scope.id` constant.
+    fn go_shaped_id_columns() -> (ArrayRef, ArrayRef) {
+        let fields = id_struct_fields();
+        let resource = StructArray::new(
+            fields.clone(),
+            vec![Arc::new(UInt16Array::from_iter_values(vec![
+                0, 0, 0, 0, 1, 0, 0, 0,
+            ]))],
+            None,
+        );
+        let scope = StructArray::new(
+            fields,
+            vec![Arc::new(UInt16Array::from_iter_values(vec![0; 8]))],
+            None,
+        );
+        (Arc::new(resource), Arc::new(scope))
+    }
+
+    /// One `service.name` attribute per resource id, in the quasi-delta form
+    /// Go emits: the two rows differ in value, so the parent ids stay absolute.
+    fn go_shaped_resource_attrs() -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(consts::PARENT_ID, DataType::UInt16, false),
+                Field::new(consts::ATTRIBUTE_TYPE, DataType::UInt8, false),
+                Field::new(consts::ATTRIBUTE_KEY, DataType::Utf8, false),
+                Field::new(consts::ATTRIBUTE_STR, DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(UInt16Array::from_iter_values(vec![0, 1])),
+                Arc::new(UInt8Array::from_iter_values(vec![
+                    AttributeValueType::Str as u8,
+                    AttributeValueType::Str as u8,
+                ])),
+                Arc::new(StringArray::from_iter_values(vec![
+                    "service.name",
+                    "service.name",
+                ])),
+                Arc::new(StringArray::from_iter_values(vec![
+                    "dbg-svc-a",
+                    "dbg-svc-b",
+                ])),
+            ],
+        )
+        .expect("resource attrs batch")
+    }
+
+    /// The `service.name` of each resource, in the order the signal emits them.
+    fn service_names(resources: &[Option<Resource>]) -> Vec<String> {
+        use crate::proto::opentelemetry::common::v1::any_value::Value;
+
+        resources
+            .iter()
+            .map(|resource| {
+                resource
+                    .as_ref()
+                    .and_then(|r| {
+                        r.attributes
+                            .iter()
+                            .find(|kv| kv.key == "service.name")
+                            .and_then(|kv| match kv.value.as_ref()?.value.as_ref()? {
+                                Value::StringValue(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_logs_go_shaped_scope_shared_across_resources() {
+        let (resource, scope) = go_shaped_id_columns();
+        let logs_rb = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(consts::RESOURCE, DataType::Struct(id_struct_fields()), true),
+                Field::new(consts::SCOPE, DataType::Struct(id_struct_fields()), true),
+                Field::new(
+                    consts::TIME_UNIX_NANO,
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    true,
+                ),
+            ])),
+            vec![
+                resource,
+                scope,
+                // rows 0..4 belong to resource 0, rows 4..8 to resource 1
+                Arc::new(TimestampNanosecondArray::from_iter_values(vec![
+                    0, 2, 4, 6, 1, 3, 5, 7,
+                ])),
+            ],
+        )
+        .expect("logs batch");
+
+        // One scope, shared by both resources, carrying one attribute. Both
+        // `ScopeLogs` must come out holding a copy of it.
+        let scope_attrs = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(consts::PARENT_ID, DataType::UInt16, false),
+                Field::new(consts::ATTRIBUTE_TYPE, DataType::UInt8, false),
+                Field::new(consts::ATTRIBUTE_KEY, DataType::Utf8, false),
+                Field::new(consts::ATTRIBUTE_STR, DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(UInt16Array::from_iter_values(vec![0])),
+                Arc::new(UInt8Array::from_iter_values(vec![
+                    AttributeValueType::Str as u8,
+                ])),
+                Arc::new(StringArray::from_iter_values(vec!["scope.kind"])),
+                Arc::new(StringArray::from_iter_values(vec!["shared"])),
+            ],
+        )
+        .expect("scope attrs batch");
+
+        let mut batch = OtapArrowRecords::Logs(Logs::default());
+        batch.set(ArrowPayloadType::Logs, logs_rb).unwrap();
+        batch
+            .set(ArrowPayloadType::ResourceAttrs, go_shaped_resource_attrs())
+            .unwrap();
+        batch
+            .set(ArrowPayloadType::ScopeAttrs, scope_attrs)
+            .unwrap();
+
+        let decoded = decode_logs(batch);
+
+        let resources: Vec<_> = decoded
+            .resource_logs
+            .iter()
+            .map(|rl| rl.resource.clone())
+            .collect();
+        assert_eq!(
+            service_names(&resources),
+            vec!["dbg-svc-a".to_string(), "dbg-svc-b".to_string()],
+            "each resource must keep its own service.name"
+        );
+
+        let times: Vec<Vec<u64>> = decoded
+            .resource_logs
+            .iter()
+            .map(|rl| {
+                rl.scope_logs
+                    .iter()
+                    .flat_map(|sl| sl.log_records.iter().map(|lr| lr.time_unix_nano))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            times,
+            vec![vec![0, 2, 4, 6], vec![1, 3, 5, 7]],
+            "log records must stay with the resource they arrived under"
+        );
+
+        // The shared scope is emitted once per resource, and each copy has to
+        // carry the scope's attributes: a forward-only child cursor would hand
+        // them to the first resource and leave the second one empty.
+        let scope_attr_keys: Vec<Vec<String>> = decoded
+            .resource_logs
+            .iter()
+            .map(|rl| {
+                rl.scope_logs
+                    .iter()
+                    .flat_map(|sl| {
+                        sl.scope
+                            .as_ref()
+                            .map(|s| s.attributes.iter().map(|kv| kv.key.clone()).collect())
+                            .unwrap_or_else(Vec::new)
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            scope_attr_keys,
+            vec![vec!["scope.kind"], vec!["scope.kind"]],
+            "a scope shared across resources keeps its attributes in every copy"
+        );
+    }
+
+    #[test]
+    fn test_traces_go_shaped_scope_shared_across_resources() {
+        let (resource, scope) = go_shaped_id_columns();
+        let spans_rb = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(consts::RESOURCE, DataType::Struct(id_struct_fields()), true),
+                Field::new(consts::SCOPE, DataType::Struct(id_struct_fields()), true),
+                Field::new(consts::NAME, DataType::Utf8, true),
+                Field::new(
+                    consts::START_TIME_UNIX_NANO,
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    false,
+                ),
+                Field::new(
+                    consts::DURATION_TIME_UNIX_NANO,
+                    DataType::Duration(TimeUnit::Nanosecond),
+                    false,
+                ),
+                Field::new(consts::TRACE_ID, DataType::FixedSizeBinary(16), false),
+                Field::new(consts::SPAN_ID, DataType::FixedSizeBinary(8), false),
+            ])),
+            vec![
+                resource,
+                scope,
+                // rows 0..4 belong to resource 0, rows 4..8 to resource 1
+                Arc::new(StringArray::from_iter_values(vec![
+                    "a0", "a2", "a4", "a6", "b1", "b3", "b5", "b7",
+                ])),
+                Arc::new(TimestampNanosecondArray::from_iter_values(0..8)),
+                Arc::new(DurationNanosecondArray::from_iter_values(
+                    std::iter::repeat_n(1, 8),
+                )),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(std::iter::repeat_n([0u8; 16], 8))
+                        .expect("trace ids"),
+                ),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(std::iter::repeat_n([0u8; 8], 8))
+                        .expect("span ids"),
+                ),
+            ],
+        )
+        .expect("spans batch");
+
+        let mut batch = OtapArrowRecords::Traces(Traces::default());
+        batch.set(ArrowPayloadType::Spans, spans_rb).unwrap();
+        batch
+            .set(ArrowPayloadType::ResourceAttrs, go_shaped_resource_attrs())
+            .unwrap();
+
+        let decoded = decode_traces(batch);
+
+        let resources: Vec<_> = decoded
+            .resource_spans
+            .iter()
+            .map(|rs| rs.resource.clone())
+            .collect();
+        assert_eq!(
+            service_names(&resources),
+            vec!["dbg-svc-a".to_string(), "dbg-svc-b".to_string()],
+            "each resource must keep its own service.name"
+        );
+
+        let names: Vec<Vec<String>> = decoded
+            .resource_spans
+            .iter()
+            .map(|rs| {
+                rs.scope_spans
+                    .iter()
+                    .flat_map(|ss| ss.spans.iter().map(|s| s.name.clone()))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![vec!["a0", "a2", "a4", "a6"], vec!["b1", "b3", "b5", "b7"]],
+            "spans must stay with the resource they arrived under"
+        );
+    }
+
+    #[test]
+    fn test_metrics_go_shaped_scope_shared_across_resources() {
+        let fields = id_struct_fields();
+        let resource = StructArray::new(
+            fields.clone(),
+            vec![Arc::new(UInt16Array::from_iter_values(vec![0, 1]))],
+            None,
+        );
+        let scope = StructArray::new(
+            fields,
+            vec![Arc::new(UInt16Array::from_iter_values(vec![0, 0]))],
+            None,
+        );
+        let metrics_rb = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(consts::RESOURCE, DataType::Struct(id_struct_fields()), true),
+                Field::new(consts::SCOPE, DataType::Struct(id_struct_fields()), true),
+                Field::new(consts::ID, DataType::UInt16, true),
+                Field::new(consts::METRIC_TYPE, DataType::UInt8, false),
+                Field::new(consts::NAME, DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(resource),
+                Arc::new(scope),
+                // delta encoded, decodes to [0, 1]
+                Arc::new(UInt16Array::from_iter_values(vec![0, 1])),
+                Arc::new(UInt8Array::from_iter_values(vec![
+                    MetricType::Gauge as u8,
+                    MetricType::Gauge as u8,
+                ])),
+                Arc::new(StringArray::from_iter_values(vec!["m-a", "m-b"])),
+            ],
+        )
+        .expect("metrics batch");
+
+        let mut batch = OtapArrowRecords::Metrics(Metrics::default());
+        batch
+            .set(ArrowPayloadType::UnivariateMetrics, metrics_rb)
+            .unwrap();
+        batch
+            .set(ArrowPayloadType::ResourceAttrs, go_shaped_resource_attrs())
+            .unwrap();
+
+        let decoded = decode_metrics(batch);
+
+        let resources: Vec<_> = decoded
+            .resource_metrics
+            .iter()
+            .map(|rm| rm.resource.clone())
+            .collect();
+        assert_eq!(
+            service_names(&resources),
+            vec!["dbg-svc-a".to_string(), "dbg-svc-b".to_string()],
+            "each resource must keep its own service.name"
+        );
+
+        let names: Vec<Vec<String>> = decoded
+            .resource_metrics
+            .iter()
+            .map(|rm| {
+                rm.scope_metrics
+                    .iter()
+                    .flat_map(|sm| sm.metrics.iter().map(|m| m.name.clone()))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![vec!["m-a"], vec!["m-b"]],
+            "metrics must stay with the resource they arrived under"
+        );
     }
 }

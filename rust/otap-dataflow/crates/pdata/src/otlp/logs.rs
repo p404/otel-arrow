@@ -358,6 +358,15 @@ impl LogsProtoBytesEncoder {
             .scope_arrays
             .id
             .and_then(|arr| arr.value_at(index));
+        // A `ScopeLogs` belongs to exactly one `ResourceLogs`, and a producer
+        // may reuse one scope ID across resources (Go's `otelarrow` exporter
+        // numbers scopes per distinct scope, not per resource/scope pair), so
+        // this run also ends when the resource changes. The pair is the key
+        // `init_cursor_for_root_batch` sorted the root rows by.
+        let resource_id = logs_data_arrays
+            .resource_arrays
+            .id
+            .and_then(|arr| arr.value_at(index));
 
         loop {
             result_buf.encode_len_delimited(SCOPE_LOGS_LOG_RECORDS, |result_buf| {
@@ -369,14 +378,18 @@ impl LogsProtoBytesEncoder {
                 break;
             }
 
-            // check if we've found a new scope ID. If so, break
+            // check if we've found a new resource or scope ID. If so, break
             // Safety: we've just checked above that cursor isn't finished
             let next_index = self.root_cursor.curr_index().expect("cursor not finished");
             let next_scope_id = logs_data_arrays
                 .scope_arrays
                 .id
                 .and_then(|arr| arr.value_at(next_index));
-            if scope_id != next_scope_id {
+            let next_resource_id = logs_data_arrays
+                .resource_arrays
+                .id
+                .and_then(|arr| arr.value_at(next_index));
+            if (resource_id, scope_id) != (next_resource_id, next_scope_id) {
                 break;
             }
         }
